@@ -4,12 +4,24 @@ const SESSION_KEY = "rasp.attendance.session";
 const SNAPSHOT_KEY = "rasp.attendance.snapshot";
 const WORKER_KEY = "rasp.workerUrl";
 
+export const ATTENDANCE_NETWORK_MESSAGE = "Нет связи с сервером посещаемости. Обновите страницу или удалите сайт с экрана и откройте снова. Если не поможет — Worker недоступен из сети.";
+
 export class AttendanceError extends Error {
   constructor(message, code) {
     super(message);
     this.name = "AttendanceError";
     this.code = code || "failed";
   }
+}
+
+export function asAttendanceError(error) {
+  const message = String(error?.message || "");
+  const network = error instanceof TypeError
+    || error?.name === "TypeError"
+    || error?.name === "NetworkError"
+    || /Failed to fetch|NetworkError|Load failed/i.test(message);
+  if (network) return new AttendanceError(ATTENDANCE_NETWORK_MESSAGE, "network");
+  return error;
 }
 
 function readJson(key) {
@@ -152,12 +164,27 @@ async function readBody(response) {
   }
 }
 
+async function probeWorker(workerUrl) {
+  try {
+    const response = await fetch(`${workerUrl}/`, { headers: { Accept: "application/json" } });
+    await response.text().catch(() => "");
+  } catch (error) {
+    throw asAttendanceError(error);
+  }
+}
+
 export async function loginAttendance(workerUrl, login, password) {
-  const response = await fetch(`${workerUrl}/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ login, password }),
-  });
+  await probeWorker(workerUrl);
+  let response;
+  try {
+    response = await fetch(`${workerUrl}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ login, password }),
+    });
+  } catch (error) {
+    throw asAttendanceError(error);
+  }
   const { json } = await readBody(response);
   if (!response.ok || !json?.ok || !json.token) {
     throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
@@ -170,9 +197,14 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
   url.searchParams.set("from", from);
   url.searchParams.set("to", to);
   if (options.needName === false) url.searchParams.set("needName", "0");
-  const response = await fetch(url, {
-    headers: { Accept: "application/json", "X-Vgltu-Session": token },
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { Accept: "application/json", "X-Vgltu-Session": token },
+    });
+  } catch (error) {
+    throw asAttendanceError(error);
+  }
   const { json } = await readBody(response);
   if (response.status === 401) {
     throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
