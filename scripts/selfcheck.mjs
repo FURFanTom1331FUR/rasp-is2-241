@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { markOf, normalizeAttendance, normalizeWorkerUrl } from "../js/attendance.js";
+import { markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts } from "../worker/src/index.js";
 import { parseScheduleHtml } from "../js/parse.js";
@@ -55,6 +55,18 @@ assert.equal(normalizeAttendance({
   gotData: true,
   data: [{ date: "23.09.2026", subjects: [{ name: "Экономика", type: "лек", go: "0" }] }],
 })[0].subjects[0].mark, "absent");
+assert.deepEqual(summarizeAttendance([
+  { subjects: [{ mark: "present" }, { mark: "absent" }, { mark: "none" }] },
+  { subjects: [{ mark: "present" }] },
+]), {
+  total: 4,
+  absent: 1,
+  present: 2,
+  unmarked: 1,
+  attended: 3,
+  percent: 75,
+});
+assert.equal(summarizeAttendance([]).percent, null);
 assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
 assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
 assert.deepEqual(dateAttempts("2026-09-23"), ["23.09.2026", "2026-09-23"]);

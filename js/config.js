@@ -1,4 +1,3 @@
-// Адрес своего Cloudflare Worker без слэша в конце.
-// Пустая строка — адрес можно вписать в «Ещё» на этом телефоне.
+// Адрес Cloudflare Worker без слэша в конце. В интерфейсе его нет.
 // Пароль студента сюда не кладётся.
 export const WORKER_URL = "https://rasp-attendance.harsh-raft.workers.dev";

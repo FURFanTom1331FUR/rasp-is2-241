@@ -7,8 +7,8 @@ import {
   logoutAttendance,
   saveSession,
   saveSnapshot,
-  saveWorkerUrl,
   clearSession,
+  summarizeAttendance,
 } from "./attendance.js";
 import {
   addDays,
@@ -391,7 +391,7 @@ function scheduleView() {
   } else {
     body = `<div class="lessons">${dayBody(iso)}</div>`;
   }
-  return `${dateHero(iso)}
+  return `${scheduleSwitch()}${dateHero(iso)}
   ${body}
   <section class="panel">
     ${dateControls(iso)}
@@ -443,30 +443,55 @@ function attendanceDaysHtml(snapshot) {
     .join("");
 }
 
+function formatPercent(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  const rounded = Math.round(value * 10) / 10;
+  const text = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace(".", ",");
+  return `${text}%`;
+}
+
+function summaryCard(snapshot) {
+  const stats = snapshot.summary || summarizeAttendance(snapshot.days);
+  const range = `${formatDotsSafe(snapshot.from)} – ${formatDotsSafe(snapshot.to)}`;
+  const formula = stats.unmarked
+    ? `По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие. ${stats.unmarked} без отметки входят в «всего» и не считаются пропуском.`
+    : "По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие.";
+  if (!stats.total) {
+    return `<article class="summary">
+      <p class="summary-kicker">${esc(snapshot.label || "Журнал")} · ${esc(range)}</p>
+      <p class="summary-empty">В журнале нет занятий</p>
+      <p class="formula">${esc(formula)}</p>
+    </article>`;
+  }
+  return `<article class="summary">
+    <p class="summary-kicker">${esc(snapshot.label || "Журнал")} · ${esc(range)}</p>
+    <p class="summary-percent">${esc(formatPercent(stats.percent))}</p>
+    <p class="summary-caption">посещаемость</p>
+    <div class="summary-grid">
+      <div><strong>${stats.absent}</strong><span>пропусков «Н»</span></div>
+      <div><strong>${stats.attended} из ${stats.total}</strong><span>без пропуска</span></div>
+    </div>
+    <p class="formula">${esc(formula)}</p>
+  </article>`;
+}
+
 function attendanceBlock() {
   const session = state.attendance.session;
   const snapshot = state.attendance.snapshot;
   const range = attendanceRange();
-  const worker = configuredWorkerUrl();
-  const absences = (snapshot?.days || []).reduce(
-    (sum, day) => sum + (day.subjects || []).filter((subject) => subject.mark === "absent").length,
-    0,
-  );
-  const warning = `<p class="warn-note">Пароль не сохраняется на телефоне. Он один раз уходит на ваш Worker и сразу пересылается только на vgltu.ru. Чужой адрес вставлять нельзя. «Выйти» стирает сессию.</p>`;
+  const warning = `<p class="warn-note">Пароль не сохраняется на телефоне и уходит только на vgltu.ru. «Выйти» стирает сессию.</p>`;
   const copy = snapshot?.fetchedAt
     ? `<p class="status">Копия от ${esc(formatStamp(snapshot.fetchedAt))}${snapshot.login ? ` · ID ${esc(snapshot.login)}` : ""}.${navigator.onLine ? "" : " Нет сети."}</p>`
     : "";
-  const journal = snapshot ? `<p class="status">${esc(snapshot.label || "Журнал")} · ${esc(formatDotsSafe(snapshot.from))} – ${esc(formatDotsSafe(snapshot.to))}. Пропусков: ${absences}.</p>${state.attendance.loading ? `<div class="card skeleton"></div>` : attendanceDaysHtml(snapshot)}${copy}` : "";
+  const summary = snapshot ? summaryCard(snapshot) : "";
+  const list = snapshot
+    ? `<h2 class="list-title">Занятия</h2><div class="att-list">${attendanceDaysHtml(snapshot)}</div>${copy}`
+    : "";
+  const journal = `${summary}${state.attendance.loading ? `<div class="card skeleton"></div>` : ""}${list}`;
   if (!session) {
     return `<article class="block">
       <h2>Посещаемость</h2>
-      <p>Журнал как в личном кабинете: за семестр или за выбранные даты. Браузер с GitHub Pages сам на vgltu.ru не ходит, поэтому нужен ваш бесплатный Cloudflare Worker.</p>
-      <form data-worker-form>
-        <label class="field">Адрес Worker
-          <input id="worker-url" name="worker" value="${esc(worker)}" placeholder="https://имя.workers.dev" autocomplete="off" spellcheck="false" />
-        </label>
-        <button class="ghost" type="submit">Сохранить адрес</button>
-      </form>
+      <p>Журнал как в личном кабинете: за семестр или за выбранные даты. Войдите с ID студента и паролем кабинета ВГЛТУ.</p>
       <form data-attendance-form>
         <label class="field">ID студента
           <input name="login" autocomplete="username" inputmode="text" required />
@@ -478,9 +503,9 @@ function attendanceBlock() {
         ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
         <button class="primary" type="submit">${state.attendance.loading ? "Входим…" : "Войти"}</button>
       </form>
-      ${journal}
       <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть посещаемость на vgltu.ru</a></p>
-    </article>`;
+    </article>
+    ${journal}`;
   }
   const dates = state.attendance.scope === "dates"
     ? `<label class="field">С даты<input id="att-from" type="date" value="${esc(state.attendance.from)}" /></label>
@@ -490,6 +515,10 @@ function attendanceBlock() {
   return `<article class="block">
     <h2>Посещаемость</h2>
     <p class="status">ID ${esc(session.login)}. Сессия только на этом телефоне, пароль не сохранён.</p>
+    ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
+  </article>
+  ${state.attendance.loading && !snapshot ? `<div class="card skeleton"></div><div class="card skeleton"></div>` : summary}
+  <article class="block">
     <div class="seg">
       <button type="button" data-action="att-scope" data-scope="semester" aria-pressed="${state.attendance.scope === "semester" ? "true" : "false"}">Семестр</button>
       <button type="button" data-action="att-scope" data-scope="dates" aria-pressed="${state.attendance.scope === "dates" ? "true" : "false"}">Даты</button>
@@ -497,23 +526,36 @@ function attendanceBlock() {
     ${dates}
     <p class="status">${esc(range.label)} · ${esc(formatDots(range.from))} – ${esc(formatDots(range.to))}</p>
     ${warning}
-    ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
-    ${state.attendance.loading && !snapshot ? `<div class="card skeleton"></div><div class="card skeleton"></div>` : journal}
     <button class="primary" type="button" data-action="att-refresh">Обновить</button>
     <button class="ghost" type="button" data-action="att-logout">Выйти</button>
     <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть на vgltu.ru</a></p>
-  </article>`;
+  </article>
+  ${list}`;
 }
 
 function formatDotsSafe(iso) {
   return isValidIso(iso) ? formatDots(iso) : String(iso || "");
 }
 
+function attendanceView() {
+  return `<section class="more att-screen">${attendanceBlock()}</section>`;
+}
+
+function scheduleSwitch() {
+  const items = [
+    ["today", "Сегодня"],
+    ["tomorrow", "Завтра"],
+    ["week", "Неделя"],
+  ];
+  return `<div class="seg schedule-seg">${items
+    .map(([mode, label]) => `<button type="button" data-action="mode" data-mode="${mode}" aria-pressed="${state.mode === mode ? "true" : "false"}">${label}</button>`)
+    .join("")}</div>`;
+}
+
 function moreView() {
   const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
-    ${attendanceBlock()}
     <article class="block">
       <h2>Напоминание</h2>
       <p>За 10 минут до следующей пары, пока приложение открыто. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
@@ -571,31 +613,41 @@ function navIcon(name) {
     today: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/><circle cx="12" cy="15" r="1.3" fill="currentColor" stroke="none"/>`,
     tomorrow: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M10 15h4"/>`,
     week: `<path d="M5 7h14M5 12h14M5 17h9"/>`,
+    schedule: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/><circle cx="12" cy="15" r="1.3" fill="currentColor" stroke="none"/>`,
+    attendance: `<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 12.2l2.2 2.2L16 9"/>`,
     more: `<circle cx="6" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.2" fill="currentColor" stroke="none"/>`,
   };
   return `<svg ${common}>${paths[name]}</svg>`;
 }
 
+function navSection() {
+  if (state.mode === "more") return "more";
+  if (state.mode === "attendance") return "attendance";
+  return "schedule";
+}
+
 function nav() {
+  const current = navSection();
   const items = [
-    ["today", "Сегодня"],
-    ["tomorrow", "Завтра"],
-    ["week", "Неделя"],
+    ["schedule", "Расписание"],
+    ["attendance", "Посещаемость"],
     ["more", "Ещё"],
   ];
   return `<nav class="nav">${items
-    .map(([mode, label]) => `<button type="button" data-action="mode" data-mode="${mode}" ${state.mode === mode ? 'aria-current="page"' : ""}>${navIcon(mode)}${label}</button>`)
+    .map(([mode, label]) => `<button type="button" data-action="mode" data-mode="${mode}" ${current === mode ? 'aria-current="page"' : ""}>${navIcon(mode)}${label}</button>`)
     .join("")}</nav>`;
 }
 
 function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
-  const main = !state.group
-    ? `<section class="hero"><p class="kicker">Сначала группа</p><h1 class="hero-date hero-range">Выберите код</h1><p class="weekday">Например ${esc(DEFAULT_GROUP)}. Расписание останется на этом телефоне.</p></section>`
+  const main = state.mode === "attendance"
+    ? attendanceView()
     : state.mode === "more"
       ? moreView()
-      : scheduleView();
+      : !state.group
+        ? `<section class="hero"><p class="kicker">Сначала группа</p><h1 class="hero-date hero-range">Выберите код</h1><p class="weekday">Например ${esc(DEFAULT_GROUP)}. Расписание останется на этом телефоне.</p></section>`
+        : scheduleView();
   app.innerHTML = `<header class="top">
       <div class="top-row">
         <div>
@@ -703,7 +755,7 @@ app.addEventListener("click", (event) => {
   if (action === "mode") {
     const mode = button.dataset.mode;
     state.dateError = "";
-    if (mode === "today") goToday();
+    if (mode === "today" || mode === "schedule") goToday();
     else if (mode === "tomorrow") {
       state.follow = "tomorrow";
       state.mode = "tomorrow";
@@ -713,10 +765,13 @@ app.addEventListener("click", (event) => {
       state.mode = "week";
       render();
       ensureWeek();
+    } else if (mode === "attendance") {
+      state.mode = "attendance";
+      render();
+      if (state.attendance.session && navigator.onLine) refreshAttendance();
     } else {
       state.mode = "more";
       render();
-      if (state.attendance.session && navigator.onLine) refreshAttendance();
     }
   } else if (action === "go-today") goToday();
   else if (action === "shift-day") {
@@ -786,13 +841,6 @@ app.addEventListener("submit", (event) => {
   } else if (event.target.matches("[data-group-form]")) {
     event.preventDefault();
     commitGroup(state.query);
-  } else if (event.target.matches("[data-worker-form]")) {
-    event.preventDefault();
-    const saved = saveWorkerUrl(event.target.worker.value);
-    state.attendance.error = saved == null
-      ? "Нужен https-адрес на .workers.dev, localhost или адрес из js/config.js."
-      : "";
-    render();
   } else if (event.target.matches("[data-attendance-form]")) {
     event.preventDefault();
     submitAttendance(event.target);
@@ -850,7 +898,7 @@ async function submitAttendance(form) {
   form.password.value = "";
   const worker = configuredWorkerUrl();
   if (!worker) {
-    state.attendance.error = "Сначала сохраните адрес своего Cloudflare Worker.";
+    state.attendance.error = "Посещаемость сейчас недоступна.";
     render();
     return;
   }
@@ -866,8 +914,12 @@ async function submitAttendance(form) {
   } catch (error) {
     state.attendance.loading = false;
     state.attendance.error = error.message || "Не удалось войти";
-    if (state.mode === "more") render();
+    if (state.mode === "attendance") render();
   }
+}
+
+function showAttendance() {
+  return state.mode === "attendance";
 }
 
 async function refreshAttendance() {
@@ -875,13 +927,13 @@ async function refreshAttendance() {
   const session = state.attendance.session;
   const worker = configuredWorkerUrl();
   if (!session || !worker) {
-    state.attendance.error = worker ? "Сначала войдите." : "Сначала сохраните адрес своего Cloudflare Worker.";
-    if (state.mode === "more") render();
+    state.attendance.error = worker ? "Сначала войдите." : "Посещаемость сейчас недоступна.";
+    if (showAttendance()) render();
     return;
   }
   if (!navigator.onLine) {
     state.attendance.error = "Нет сети. Показана последняя копия.";
-    if (state.mode === "more") render();
+    if (showAttendance()) render();
     return;
   }
   const range = attendanceRange();
@@ -892,7 +944,7 @@ async function refreshAttendance() {
   }
   state.attendance.loading = true;
   state.attendance.error = "";
-  if (state.mode === "more") render();
+  if (showAttendance()) render();
   try {
     const result = await fetchAttendance(worker, session.token, range.from, range.to);
     if (token !== attendanceToken) return;
@@ -903,6 +955,7 @@ async function refreshAttendance() {
       from: range.from,
       to: range.to,
       days: result.days,
+      summary: summarizeAttendance(result.days),
     };
     saveSnapshot(snapshot);
     state.attendance.snapshot = snapshot;
@@ -916,7 +969,7 @@ async function refreshAttendance() {
     state.attendance.snapshot = loadSnapshot();
   }
   state.attendance.loading = false;
-  if (state.mode === "more") render();
+  if (showAttendance()) render();
 }
 
 async function signOutAttendance() {
