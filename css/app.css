@@ -595,15 +595,23 @@ label.field select {
   font-weight: 700;
 }
 .seg button[aria-pressed="true"] { background: var(--accent); color: #f7fff9; }
-.warn-note {
-  margin: 10px 0 0;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: var(--warn-bg);
-  color: var(--warn);
-  font-size: 0.86rem;
-  line-height: 1.4;
+.student-name {
+  margin: 2px 0 8px;
+  font-size: 1.35rem;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
 }
+.student-label {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.summary .student-name { font-size: 1.15rem; }
 .att-screen { padding-left: 0; padding-right: 0; }
 .att-screen .block { margin-left: 16px; margin-right: 16px; }
 .summary {

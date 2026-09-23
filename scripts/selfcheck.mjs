@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
-import { dateAttempts } from "../worker/src/index.js";
+import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
 import { parseScheduleHtml } from "../js/parse.js";
 
 assert.equal(moscowIso(new Date("2026-09-22T21:00:00.000Z")), "2026-09-23");
@@ -70,6 +70,8 @@ assert.equal(summarizeAttendance([]).percent, null);
 assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
 assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
 assert.deepEqual(dateAttempts("2026-09-23"), ["23.09.2026", "2026-09-23"]);
+assert.equal(studentNameFromHtml(`<div class="user-info__fio-wrap"><div class="user-info__fio">Иванов<br> Иван  Иванович</div><span class="user-info__userid">ID</span></div>`), "Иванов Иван Иванович");
+assert.equal(studentNameFromHtml(`<div class="user-info__fio-wrap">нет</div>`), "");
 assert.equal(moscowInstant("2026-09-23", "13:40").toISOString(), "2026-09-23T10:40:00.000Z");
 
 const fixture = `

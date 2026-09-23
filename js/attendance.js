@@ -67,13 +67,23 @@ export function loadSession() {
   const session = readJson(SESSION_KEY);
   if (!session?.token || !session.login) return null;
   if (!/^[A-Za-z0-9]{8,128}$/.test(session.token)) return null;
-  return { login: String(session.login), token: session.token, savedAt: session.savedAt || "" };
+  return {
+    login: String(session.login),
+    token: session.token,
+    savedAt: session.savedAt || "",
+    name: cleanStudentName(session.name),
+  };
 }
 
 export function saveSession(session) {
   localStorage.setItem(
     SESSION_KEY,
-    JSON.stringify({ login: session.login, token: session.token, savedAt: session.savedAt }),
+    JSON.stringify({
+      login: session.login,
+      token: session.token,
+      savedAt: session.savedAt,
+      name: cleanStudentName(session.name),
+    }),
   );
 }
 
@@ -107,6 +117,12 @@ export function summarizeAttendance(days) {
   const attended = total - absent;
   const percent = total ? Math.round((attended / total) * 1000) / 10 : null;
   return { total, absent, present, unmarked, attended, percent };
+}
+
+export function cleanStudentName(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text || text.length > 160 || !/[A-Za-zА-Яа-яЁё]/.test(text)) return "";
+  return text;
 }
 
 export function markOf(go) {
@@ -146,13 +162,14 @@ export async function loginAttendance(workerUrl, login, password) {
   if (!response.ok || !json?.ok || !json.token) {
     throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
   }
-  return { login: String(json.login || login), token: String(json.token) };
+  return { login: String(json.login || login), token: String(json.token), name: cleanStudentName(json.name) };
 }
 
-export async function fetchAttendance(workerUrl, token, from, to) {
+export async function fetchAttendance(workerUrl, token, from, to, options = {}) {
   const url = new URL(`${workerUrl}/attendance`);
   url.searchParams.set("from", from);
   url.searchParams.set("to", to);
+  if (options.needName === false) url.searchParams.set("needName", "0");
   const response = await fetch(url, {
     headers: { Accept: "application/json", "X-Vgltu-Session": token },
   });
@@ -166,6 +183,7 @@ export async function fetchAttendance(workerUrl, token, from, to) {
   return {
     days: normalizeAttendance(json),
     format: json.format || "",
+    name: cleanStudentName(json.name),
   };
 }
 
