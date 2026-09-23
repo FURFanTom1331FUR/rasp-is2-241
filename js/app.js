@@ -3,6 +3,7 @@ import {
   fetchAttendance,
   loadSession,
   loadSnapshot,
+  asAttendanceError,
   loginAttendance,
   logoutAttendance,
   saveSession,
@@ -918,7 +919,7 @@ async function submitAttendance(form) {
     await refreshAttendance();
   } catch (error) {
     state.attendance.loading = false;
-    state.attendance.error = error.message || "Не удалось войти";
+    state.attendance.error = asAttendanceError(error).message || "Не удалось войти";
     if (state.mode === "attendance") render();
   }
 }
@@ -976,7 +977,7 @@ async function refreshAttendance() {
       clearSession();
       state.attendance.session = null;
     }
-    state.attendance.error = error.message || "Не удалось обновить посещаемость";
+    state.attendance.error = asAttendanceError(error).message || "Не удалось обновить посещаемость";
     state.attendance.snapshot = loadSnapshot();
   }
   state.attendance.loading = false;

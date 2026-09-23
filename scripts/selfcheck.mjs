@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
+import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
 import { parseScheduleHtml } from "../js/parse.js";
@@ -67,6 +67,10 @@ assert.deepEqual(summarizeAttendance([
   percent: 75,
 });
 assert.equal(summarizeAttendance([]).percent, null);
+assert.equal(asAttendanceError(new TypeError("Failed to fetch")).message, ATTENDANCE_NETWORK_MESSAGE);
+assert.equal(asAttendanceError(new TypeError("NetworkError when attempting to fetch resource.")).message, ATTENDANCE_NETWORK_MESSAGE);
+assert.equal(asAttendanceError(new Error("Неверный ID или пароль!")).message, "Неверный ID или пароль!");
+assert.equal(ATTENDANCE_NETWORK_MESSAGE.includes("Failed to fetch"), false);
 assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
 assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
 assert.deepEqual(dateAttempts("2026-09-23"), ["23.09.2026", "2026-09-23"]);
