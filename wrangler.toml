@@ -1,0 +1,4 @@
+# Cloudflare Pages. Отдельный Worker по-прежнему деплоится из папки worker/.
+name = "rasp-is2-241"
+compatibility_date = "2026-09-01"
+pages_build_output_dir = "."

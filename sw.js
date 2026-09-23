@@ -1,4 +1,4 @@
-const SHELL = "rasp-shell-v5";
+const SHELL = "rasp-shell-v6";
 
 const FILES = [
   "./",
@@ -59,8 +59,12 @@ async function networkFirst(request) {
   }
 }
 
+const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
+  const path = url.pathname.replace(/\/$/, "") || "/";
+  if (API_PATHS.has(path)) return;
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
   event.respondWith(networkFirst(event.request));
 });
