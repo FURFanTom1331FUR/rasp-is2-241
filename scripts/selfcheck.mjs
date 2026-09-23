@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
+import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, AttendanceError, configuredWorkerUrl, markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
+import { onRequest as onLogin } from "../functions/login.js";
+import { onRequest as onAttendance } from "../functions/attendance.js";
+import { onRequest as onLogout } from "../functions/logout.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
 import { parseScheduleHtml } from "../js/parse.js";
@@ -69,6 +72,39 @@ assert.deepEqual(summarizeAttendance([
 assert.equal(summarizeAttendance([]).percent, null);
 assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
 assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
+assert.equal(configuredWorkerUrl(), "");
+globalThis.location = { origin: "https://rasp-is2-241.pages.dev/" };
+assert.equal(configuredWorkerUrl(), "https://rasp-is2-241.pages.dev");
+delete globalThis.location;
+const network = asAttendanceError(new TypeError("Failed to fetch"));
+assert.equal(network.message, ATTENDANCE_NETWORK_MESSAGE);
+assert.equal(network.message.includes("Failed to fetch"), false);
+assert.equal(asAttendanceError(Object.assign(new Error("Load failed"), { name: "TypeError" })).message, ATTENDANCE_NETWORK_MESSAGE);
+assert.equal(asAttendanceError(Object.assign(new Error("NetworkError when attempting to fetch resource."), { name: "NetworkError" })).message, ATTENDANCE_NETWORK_MESSAGE);
+const denied = new AttendanceError("Неверный ID или пароль!", "denied");
+assert.equal(asAttendanceError(denied), denied);
+const loginDenied = await onLogin({
+  request: new Request("https://rasp.pages.dev/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  }),
+});
+assert.equal(loginDenied.status, 400);
+assert.deepEqual(await loginDenied.json(), { ok: false, error: "Введите ID студента и пароль." });
+const loginOptions = await onLogin({
+  request: new Request("https://rasp.pages.dev/login", { method: "OPTIONS" }),
+});
+assert.equal(loginOptions.status, 204);
+const journal = await onAttendance({
+  request: new Request("https://rasp.pages.dev/attendance?from=2026-09-01&to=2026-09-07"),
+});
+assert.equal(journal.status, 401);
+const signedOut = await onLogout({
+  request: new Request("https://rasp.pages.dev/logout", { method: "POST" }),
+});
+assert.equal(signedOut.status, 200);
+assert.deepEqual(await signedOut.json(), { ok: true });
 assert.deepEqual(dateAttempts("2026-09-23"), ["23.09.2026", "2026-09-23"]);
 assert.equal(studentNameFromHtml(`<div class="user-info__fio-wrap"><div class="user-info__fio">Иванов<br> Иван  Иванович</div><span class="user-info__userid">ID</span></div>`), "Иванов Иван Иванович");
 assert.equal(studentNameFromHtml(`<div class="user-info__fio-wrap">нет</div>`), "");

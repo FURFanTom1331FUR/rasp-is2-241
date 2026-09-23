@@ -1,3 +1,3 @@
-// Адрес Cloudflare Worker без слэша в конце. В интерфейсе его нет.
+// Пустая строка — тот же адрес, с которого открыт сайт (корень Cloudflare Pages).
 // Пароль студента сюда не кладётся.
-export const WORKER_URL = "https://rasp-attendance.integrall1331.workers.dev";
+export const WORKER_URL = "";

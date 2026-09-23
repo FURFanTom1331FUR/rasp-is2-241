@@ -1,4 +1,5 @@
 import {
+  asAttendanceError,
   configuredWorkerUrl,
   fetchAttendance,
   loadSession,
@@ -918,7 +919,7 @@ async function submitAttendance(form) {
     await refreshAttendance();
   } catch (error) {
     state.attendance.loading = false;
-    state.attendance.error = error.message || "Не удалось войти";
+    state.attendance.error = asAttendanceError(error).message || "Не удалось войти";
     if (state.mode === "attendance") render();
   }
 }
@@ -972,11 +973,12 @@ async function refreshAttendance() {
     state.attendance.snapshot = snapshot;
   } catch (error) {
     if (token !== attendanceToken) return;
-    if (error.code === "unauthorized") {
+    const wrapped = asAttendanceError(error);
+    if (wrapped.code === "unauthorized") {
       clearSession();
       state.attendance.session = null;
     }
-    state.attendance.error = error.message || "Не удалось обновить посещаемость";
+    state.attendance.error = wrapped.message || "Не удалось обновить посещаемость";
     state.attendance.snapshot = loadSnapshot();
   }
   state.attendance.loading = false;

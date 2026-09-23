@@ -12,6 +12,20 @@ export class AttendanceError extends Error {
   }
 }
 
+export const ATTENDANCE_NETWORK_MESSAGE =
+  "Нет связи с сервером посещаемости. Обновите страницу или удалите сайт с экрана и откройте снова. Если не поможет — Worker недоступен из сети.";
+
+export function asAttendanceError(error) {
+  if (error instanceof AttendanceError) return error;
+  const name = String(error?.name || "");
+  const message = String(error?.message || "");
+  if (name === "TypeError" || name === "NetworkError" || /Failed to fetch|NetworkError|Load failed/i.test(message)) {
+    return new AttendanceError(ATTENDANCE_NETWORK_MESSAGE, "network");
+  }
+  if (error instanceof Error) return error;
+  return new AttendanceError("Не удалось войти", "failed");
+}
+
 function readJson(key) {
   try {
     const raw = localStorage.getItem(key);
@@ -52,7 +66,11 @@ export function normalizeWorkerUrl(value, baked = bakedWorkerUrl()) {
 }
 
 export function configuredWorkerUrl() {
-  return normalizeWorkerUrl(bakedWorkerUrl()) || "";
+  const baked = normalizeWorkerUrl(bakedWorkerUrl());
+  if (baked) return baked;
+  const origin = globalThis.location?.origin;
+  if (origin && origin !== "null") return String(origin).replace(/\/$/, "");
+  return "";
 }
 
 export function saveWorkerUrl(value) {
@@ -153,38 +171,46 @@ async function readBody(response) {
 }
 
 export async function loginAttendance(workerUrl, login, password) {
-  const response = await fetch(`${workerUrl}/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ login, password }),
-  });
-  const { json } = await readBody(response);
-  if (!response.ok || !json?.ok || !json.token) {
-    throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
+  try {
+    const response = await fetch(`${workerUrl}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ login, password }),
+    });
+    const { json } = await readBody(response);
+    if (!response.ok || !json?.ok || !json.token) {
+      throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
+    }
+    return { login: String(json.login || login), token: String(json.token), name: cleanStudentName(json.name) };
+  } catch (error) {
+    throw asAttendanceError(error);
   }
-  return { login: String(json.login || login), token: String(json.token), name: cleanStudentName(json.name) };
 }
 
 export async function fetchAttendance(workerUrl, token, from, to, options = {}) {
-  const url = new URL(`${workerUrl}/attendance`);
-  url.searchParams.set("from", from);
-  url.searchParams.set("to", to);
-  if (options.needName === false) url.searchParams.set("needName", "0");
-  const response = await fetch(url, {
-    headers: { Accept: "application/json", "X-Vgltu-Session": token },
-  });
-  const { json } = await readBody(response);
-  if (response.status === 401) {
-    throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
+  try {
+    const url = new URL(`${workerUrl}/attendance`);
+    url.searchParams.set("from", from);
+    url.searchParams.set("to", to);
+    if (options.needName === false) url.searchParams.set("needName", "0");
+    const response = await fetch(url, {
+      headers: { Accept: "application/json", "X-Vgltu-Session": token },
+    });
+    const { json } = await readBody(response);
+    if (response.status === 401) {
+      throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
+    }
+    if (!response.ok || !json?.ok) {
+      throw new AttendanceError(json?.error || "Кабинет не отдал посещаемость", "failed");
+    }
+    return {
+      days: normalizeAttendance(json),
+      format: json.format || "",
+      name: cleanStudentName(json.name),
+    };
+  } catch (error) {
+    throw asAttendanceError(error);
   }
-  if (!response.ok || !json?.ok) {
-    throw new AttendanceError(json?.error || "Кабинет не отдал посещаемость", "failed");
-  }
-  return {
-    days: normalizeAttendance(json),
-    format: json.format || "",
-    name: cleanStudentName(json.name),
-  };
 }
 
 export async function logoutAttendance(workerUrl, token) {
