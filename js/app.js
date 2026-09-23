@@ -257,8 +257,7 @@ function statusText() {
   }
   const stamp = formatStamp(state.record.fetchedAt);
   if (state.record.origin === "live") return `Обновлено с сайта ВГЛТУ ${stamp}.${offline}`;
-  const cors = state.liveBlocked ? " Браузер не может скачать kis.vgltu.ru сам (CORS), показана сохранённая копия." : "";
-  return `Данные на ${stamp}.${cors}${offline}`;
+  return `Копия от ${stamp}.${offline}`;
 }
 
 function banner(iso) {
@@ -343,11 +342,13 @@ function scheduleView() {
   return `<section class="panel">
     ${banner(iso)}
     <h1>${esc(heading)}</h1>
+  </section>
+  ${body}
+  <section class="panel">
     ${dateControls(iso)}
     <p class="status" role="status">${esc(statusText())}</p>
     <button class="ghost" type="button" data-action="refresh">Обновить</button>
   </section>
-  ${body}
   ${installTip()}`;
 }
 
@@ -355,9 +356,9 @@ function installTip() {
   if (standalone() || loadInstallDismissed()) return "";
   const action = state.installEvent ? `<button class="primary" type="button" data-action="install">Установить</button>` : "";
   return `<aside class="tip">
-    <p><strong>Добавить на экран.</strong> Android Chrome: меню → «Установить приложение» или «Добавить на главный экран». iPhone: Safari → «Поделиться» → «На экран Домой».</p>
+    <p><strong>На экран.</strong> Android: меню Chrome → «Установить». iPhone: Safari → «Поделиться» → «На экран Домой».</p>
     ${action}
-    <button class="ghost" type="button" data-action="dismiss-tip">Скрыть подсказку</button>
+    <button class="ghost" type="button" data-action="dismiss-tip">Скрыть</button>
   </aside>`;
 }
 
