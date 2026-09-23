@@ -482,7 +482,7 @@ label.field select {
   transform: translateX(-50%);
   width: min(440px, 100%);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
   background: var(--nav);
@@ -501,8 +501,10 @@ label.field select {
   border-radius: 16px;
   background: transparent;
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: 0.62rem;
   font-weight: 700;
+  line-height: 1.15;
+  text-align: center;
 }
 
 .nav button svg { width: 22px; height: 22px; }
@@ -583,6 +585,7 @@ label.field select {
 .block ol { margin: 0 0 8px; padding-left: 1.15rem; }
 .block label.field { margin-top: 8px; }
 .block label.field input { text-align: left; padding: 0 12px; font-weight: 650; }
+.schedule-seg { margin: 8px 16px 0; }
 .seg { display: flex; gap: 8px; margin: 8px 0 4px; }
 .seg button {
   flex: 1;
@@ -601,7 +604,56 @@ label.field select {
   font-size: 0.86rem;
   line-height: 1.4;
 }
-.att-day { margin: 12px 0; }
+.att-screen { padding-left: 0; padding-right: 0; }
+.att-screen .block { margin-left: 16px; margin-right: 16px; }
+.summary {
+  margin: 0 16px 12px;
+  padding: 16px;
+  border-radius: 22px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.summary-kicker {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.summary-percent {
+  margin: 0;
+  font-size: 2.8rem;
+  font-weight: 750;
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+  font-variant-numeric: tabular-nums;
+}
+.summary-caption { margin: 4px 0 0; color: var(--muted); font-weight: 700; }
+.summary-empty { margin: 0; font-size: 1.2rem; font-weight: 700; }
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+.summary-grid div {
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: var(--sunken);
+}
+.summary-grid strong { display: block; font-size: 1.2rem; letter-spacing: -0.03em; }
+.summary-grid span { color: var(--muted); font-size: 0.78rem; }
+.formula { margin: 12px 0 0; color: var(--muted); font-size: 0.78rem; line-height: 1.4; }
+.list-title {
+  margin: 4px 16px 8px;
+  font-size: 1.05rem;
+  letter-spacing: -0.03em;
+}
+.att-screen > .status { margin-left: 16px; margin-right: 16px; }
+.att-screen > .skeleton { margin-left: 16px; margin-right: 16px; }
+.att-list { padding: 0 16px 8px; }
+.att-day { margin: 0 0 12px; }
 .att-day h3 { margin: 0 0 8px; font-size: 0.95rem; }
 .att-card {
   position: relative;

@@ -52,8 +52,6 @@ export function normalizeWorkerUrl(value, baked = bakedWorkerUrl()) {
 }
 
 export function configuredWorkerUrl() {
-  const stored = normalizeWorkerUrl(localStorage.getItem(WORKER_KEY) || "");
-  if (stored) return stored;
   return normalizeWorkerUrl(bakedWorkerUrl()) || "";
 }
 
@@ -91,6 +89,24 @@ export function loadSnapshot() {
 
 export function saveSnapshot(snapshot) {
   localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+}
+
+export function summarizeAttendance(days) {
+  let total = 0;
+  let absent = 0;
+  let present = 0;
+  let unmarked = 0;
+  for (const day of days || []) {
+    for (const subject of day.subjects || []) {
+      total += 1;
+      if (subject.mark === "absent") absent += 1;
+      else if (subject.mark === "present") present += 1;
+      else unmarked += 1;
+    }
+  }
+  const attended = total - absent;
+  const percent = total ? Math.round((attended / total) * 1000) / 10 : null;
+  return { total, absent, present, unmarked, attended, percent };
 }
 
 export function markOf(go) {

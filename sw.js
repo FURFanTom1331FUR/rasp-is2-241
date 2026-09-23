@@ -1,4 +1,4 @@
-const SHELL = "rasp-shell-v3";
+const SHELL = "rasp-shell-v4";
 
 const FILES = [
   "./",
