@@ -1,0 +1,165 @@
+import { WORKER_URL } from "./config.js";
+
+const SESSION_KEY = "rasp.attendance.session";
+const SNAPSHOT_KEY = "rasp.attendance.snapshot";
+const WORKER_KEY = "rasp.workerUrl";
+
+export class AttendanceError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = "AttendanceError";
+    this.code = code || "failed";
+  }
+}
+
+function readJson(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function bakedWorkerUrl() {
+  return String(WORKER_URL || "").trim().replace(/\/$/, "");
+}
+
+export function normalizeWorkerUrl(value, baked = bakedWorkerUrl()) {
+  const clean = String(value || "").trim().replace(/\/$/, "");
+  if (!clean) return "";
+  let url;
+  try {
+    url = new URL(clean);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password || url.search || url.hash) return null;
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return null;
+  let bakedHost = "";
+  if (baked) {
+    try {
+      bakedHost = new URL(baked).hostname;
+    } catch {
+      bakedHost = "";
+    }
+  }
+  const allowed = local || url.hostname.endsWith(".workers.dev") || (bakedHost && url.hostname === bakedHost);
+  if (!allowed) return null;
+  const path = url.pathname.replace(/\/$/, "");
+  return url.origin + path;
+}
+
+export function configuredWorkerUrl() {
+  const stored = normalizeWorkerUrl(localStorage.getItem(WORKER_KEY) || "");
+  if (stored) return stored;
+  return normalizeWorkerUrl(bakedWorkerUrl()) || "";
+}
+
+export function saveWorkerUrl(value) {
+  const next = normalizeWorkerUrl(value);
+  if (next == null) return null;
+  if (next) localStorage.setItem(WORKER_KEY, next);
+  else localStorage.removeItem(WORKER_KEY);
+  return next;
+}
+
+export function loadSession() {
+  const session = readJson(SESSION_KEY);
+  if (!session?.token || !session.login) return null;
+  if (!/^[A-Za-z0-9]{8,128}$/.test(session.token)) return null;
+  return { login: String(session.login), token: session.token, savedAt: session.savedAt || "" };
+}
+
+export function saveSession(session) {
+  localStorage.setItem(
+    SESSION_KEY,
+    JSON.stringify({ login: session.login, token: session.token, savedAt: session.savedAt }),
+  );
+}
+
+export function clearSession() {
+  localStorage.removeItem(SESSION_KEY);
+}
+
+export function loadSnapshot() {
+  const snapshot = readJson(SNAPSHOT_KEY);
+  if (!snapshot || !Array.isArray(snapshot.days)) return null;
+  return snapshot;
+}
+
+export function saveSnapshot(snapshot) {
+  localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+}
+
+export function markOf(go) {
+  if (go === "0" || go === 0) return "absent";
+  if (go == null || go === "" || go === " ") return "none";
+  return "present";
+}
+
+export function normalizeAttendance(payload) {
+  const source = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+  return source.map((day) => ({
+    date: String(day?.date || ""),
+    subjects: (Array.isArray(day?.subjects) ? day.subjects : []).map((subject) => ({
+      name: String(subject?.name || ""),
+      type: String(subject?.type || ""),
+      mark: markOf(subject?.go),
+    })),
+  }));
+}
+
+async function readBody(response) {
+  const text = await response.text();
+  try {
+    return { text, json: JSON.parse(text) };
+  } catch {
+    return { text, json: null };
+  }
+}
+
+export async function loginAttendance(workerUrl, login, password) {
+  const response = await fetch(`${workerUrl}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ login, password }),
+  });
+  const { json } = await readBody(response);
+  if (!response.ok || !json?.ok || !json.token) {
+    throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
+  }
+  return { login: String(json.login || login), token: String(json.token) };
+}
+
+export async function fetchAttendance(workerUrl, token, from, to) {
+  const url = new URL(`${workerUrl}/attendance`);
+  url.searchParams.set("from", from);
+  url.searchParams.set("to", to);
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", "X-Vgltu-Session": token },
+  });
+  const { json } = await readBody(response);
+  if (response.status === 401) {
+    throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
+  }
+  if (!response.ok || !json?.ok) {
+    throw new AttendanceError(json?.error || "Кабинет не отдал посещаемость", "failed");
+  }
+  return {
+    days: normalizeAttendance(json),
+    format: json.format || "",
+  };
+}
+
+export async function logoutAttendance(workerUrl, token) {
+  try {
+    await fetch(`${workerUrl}/logout`, {
+      method: "POST",
+      headers: { Accept: "application/json", "X-Vgltu-Session": token },
+    });
+  } catch {
+    /* Локальная сессия всё равно стирается. */
+  }
+}

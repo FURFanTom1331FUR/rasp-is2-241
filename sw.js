@@ -1,4 +1,4 @@
-const SHELL = "rasp-shell-v2";
+const SHELL = "rasp-shell-v3";
 
 const FILES = [
   "./",
@@ -7,6 +7,8 @@ const FILES = [
   "./js/dates.js",
   "./js/parse.js",
   "./js/store.js",
+  "./js/config.js",
+  "./js/attendance.js",
   "./js/app.js",
   "./manifest.webmanifest",
   "./data/groups.json",
