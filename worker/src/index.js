@@ -69,6 +69,63 @@ function looksLikeLogin(html) {
   return text.includes('id="login-form"') || text.includes("Неверный ID") || text.includes("loginform-login");
 }
 
+export function studentNameFromHtml(html) {
+  const match = String(html).match(/<([a-z0-9]+)\b[^>]*class="(?:[^"]*\s)?user-info__fio(?:\s[^"]*)?"[^>]*>([\s\S]*?)<\/\1>/i);
+  if (!match) return "";
+  const text = match[2]
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || text.length > 160 || !/[A-Za-zА-Яа-яЁё]/.test(text)) return "";
+  return text;
+}
+
+function safeLcUrl(location) {
+  try {
+    const url = new URL(location, "https://vgltu.ru");
+    if (url.protocol !== "https:" || url.hostname !== "vgltu.ru" || !url.pathname.startsWith("/lc")) return "";
+    return url.origin + url.pathname + url.search;
+  } catch {
+    return "";
+  }
+}
+
+async function fetchStudentName(token, fetchImpl) {
+  const pages = ["https://vgltu.ru/lc/", "https://vgltu.ru/lc/attendance"];
+  for (const page of pages) {
+    const response = await fetchImpl(page, {
+      redirect: "manual",
+      headers: {
+        Accept: "text/html",
+        Cookie: `PHPFRONTSESSID=${token}`,
+        "User-Agent": UA,
+      },
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const next = safeLcUrl(response.headers.get("Location") || "");
+      if (!next || next.includes("/login")) continue;
+      const followed = await fetchImpl(next, {
+        redirect: "manual",
+        headers: {
+          Accept: "text/html",
+          Cookie: `PHPFRONTSESSID=${token}`,
+          "User-Agent": UA,
+        },
+      });
+      const name = studentNameFromHtml(await followed.text());
+      if (name) return name;
+      continue;
+    }
+    const name = studentNameFromHtml(await response.text());
+    if (name) return name;
+  }
+  return "";
+}
+
 export async function performLogin(login, password, fetchImpl = fetch) {
   const page = await fetchImpl(LOGIN_PAGE, {
     redirect: "manual",
@@ -106,13 +163,24 @@ export async function performLogin(login, password, fetchImpl = fetch) {
     if (!/^[A-Za-z0-9]{8,128}$/.test(session)) {
       return { ok: false, status: 502, error: "Кабинет не выдал сессию." };
     }
-    return { ok: true, status: 200, login, token: session };
+    let name = "";
+    try {
+      const landed = safeLcUrl(location);
+      if (landed) name = studentNameFromHtml(await (await fetchImpl(landed, {
+        redirect: "manual",
+        headers: { Accept: "text/html", Cookie: cookieHeader(jar), "User-Agent": UA },
+      })).text());
+      if (!name) name = await fetchStudentName(session, fetchImpl);
+    } catch {
+      name = "";
+    }
+    return { ok: true, status: 200, login, token: session, name };
   }
   const failureHtml = await posted.text();
   return { ok: false, status: 401, error: loginMessage(failureHtml) };
 }
 
-export async function performAttendance(token, from, to, fetchImpl = fetch) {
+export async function performAttendance(token, from, to, fetchImpl = fetch, options = {}) {
   if (!/^[A-Za-z0-9]{8,128}$/.test(token || "")) {
     return { ok: false, status: 401, error: "Нет сессии. Войдите снова." };
   }
@@ -149,9 +217,9 @@ export async function performAttendance(token, from, to, fetchImpl = fetch) {
       empty = { ok: true, status: 200, format: beginDate.includes(".") ? "d.m.Y" : "Y-m-d", data };
       continue;
     }
-    return { ok: true, status: 200, format: beginDate.includes(".") ? "d.m.Y" : "Y-m-d", data };
+    return { ok: true, status: 200, format: beginDate.includes(".") ? "d.m.Y" : "Y-m-d", data, name: options.name || "" };
   }
-  if (empty) return empty;
+  if (empty) return { ...empty, name: options.name || "" };
   return { ok: false, status: 502, error: "Кабинет не отдал журнал посещаемости." };
 }
 
@@ -183,13 +251,22 @@ export default {
         }
         const result = await performLogin(login, password);
         return json(request, result.status, result.ok
-          ? { ok: true, login: result.login, token: result.token }
+          ? { ok: true, login: result.login, token: result.token, name: result.name || "" }
           : { ok: false, error: result.error });
       }
       if (request.method === "GET" && path === "/attendance") {
-        const result = await performAttendance(request.headers.get("X-Vgltu-Session") || "", url.searchParams.get("from"), url.searchParams.get("to"));
+        const sessionToken = request.headers.get("X-Vgltu-Session") || "";
+        let name = "";
+        if (url.searchParams.get("needName") !== "0") {
+          try {
+            name = await fetchStudentName(sessionToken, fetch);
+          } catch {
+            name = "";
+          }
+        }
+        const result = await performAttendance(sessionToken, url.searchParams.get("from"), url.searchParams.get("to"), fetch, { name });
         return json(request, result.status, result.ok
-          ? { ok: true, format: result.format, data: result.data }
+          ? { ok: true, format: result.format, data: result.data, name: result.name || "" }
           : { ok: false, error: result.error });
       }
       if (request.method === "POST" && path === "/logout") {

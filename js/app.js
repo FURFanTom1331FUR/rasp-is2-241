@@ -450,20 +450,28 @@ function formatPercent(value) {
   return `${text}%`;
 }
 
+function studentHeading(name) {
+  if (!name) return "";
+  return `<p class="student-name"><span class="student-label">Студент</span>${esc(name)}</p>`;
+}
+
 function summaryCard(snapshot) {
   const stats = snapshot.summary || summarizeAttendance(snapshot.days);
   const range = `${formatDotsSafe(snapshot.from)} – ${formatDotsSafe(snapshot.to)}`;
+  const who = studentHeading(snapshot.name || state.attendance.session?.name);
   const formula = stats.unmarked
     ? `По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие. ${stats.unmarked} без отметки входят в «всего» и не считаются пропуском.`
     : "По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие.";
   if (!stats.total) {
     return `<article class="summary">
+      ${who}
       <p class="summary-kicker">${esc(snapshot.label || "Журнал")} · ${esc(range)}</p>
       <p class="summary-empty">В журнале нет занятий</p>
       <p class="formula">${esc(formula)}</p>
     </article>`;
   }
   return `<article class="summary">
+    ${who}
     <p class="summary-kicker">${esc(snapshot.label || "Журнал")} · ${esc(range)}</p>
     <p class="summary-percent">${esc(formatPercent(stats.percent))}</p>
     <p class="summary-caption">посещаемость</p>
@@ -479,7 +487,6 @@ function attendanceBlock() {
   const session = state.attendance.session;
   const snapshot = state.attendance.snapshot;
   const range = attendanceRange();
-  const warning = `<p class="warn-note">Пароль не сохраняется на телефоне и уходит только на vgltu.ru. «Выйти» стирает сессию.</p>`;
   const copy = snapshot?.fetchedAt
     ? `<p class="status">Копия от ${esc(formatStamp(snapshot.fetchedAt))}${snapshot.login ? ` · ID ${esc(snapshot.login)}` : ""}.${navigator.onLine ? "" : " Нет сети."}</p>`
     : "";
@@ -499,7 +506,6 @@ function attendanceBlock() {
         <label class="field">Пароль
           <input name="password" type="password" autocomplete="current-password" required />
         </label>
-        ${warning}
         ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
         <button class="primary" type="submit">${state.attendance.loading ? "Входим…" : "Войти"}</button>
       </form>
@@ -514,7 +520,7 @@ function attendanceBlock() {
     : "";
   return `<article class="block">
     <h2>Посещаемость</h2>
-    <p class="status">ID ${esc(session.login)}. Сессия только на этом телефоне, пароль не сохранён.</p>
+    ${studentHeading(session.name || snapshot?.name)}
     ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
   </article>
   ${state.attendance.loading && !snapshot ? `<div class="card skeleton"></div><div class="card skeleton"></div>` : summary}
@@ -525,7 +531,6 @@ function attendanceBlock() {
     </div>
     ${dates}
     <p class="status">${esc(range.label)} · ${esc(formatDots(range.from))} – ${esc(formatDots(range.to))}</p>
-    ${warning}
     <button class="primary" type="button" data-action="att-refresh">Обновить</button>
     <button class="ghost" type="button" data-action="att-logout">Выйти</button>
     <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть на vgltu.ru</a></p>
@@ -907,7 +912,7 @@ async function submitAttendance(form) {
   render();
   try {
     const result = await loginAttendance(worker, login, password);
-    saveSession({ login: result.login, token: result.token, savedAt: new Date().toISOString() });
+    saveSession({ login: result.login, token: result.token, name: result.name, savedAt: new Date().toISOString() });
     state.attendance.session = loadSession();
     state.attendance.loading = false;
     await refreshAttendance();
@@ -946,10 +951,16 @@ async function refreshAttendance() {
   state.attendance.error = "";
   if (showAttendance()) render();
   try {
-    const result = await fetchAttendance(worker, session.token, range.from, range.to);
+    const result = await fetchAttendance(worker, session.token, range.from, range.to, { needName: !session.name });
     if (token !== attendanceToken) return;
+    const name = result.name || session.name || "";
+    if (name && name !== session.name) {
+      saveSession({ login: session.login, token: session.token, name, savedAt: session.savedAt });
+      state.attendance.session = loadSession();
+    }
     const snapshot = {
       login: session.login,
+      name,
       fetchedAt: new Date().toISOString(),
       label: range.label,
       from: range.from,
