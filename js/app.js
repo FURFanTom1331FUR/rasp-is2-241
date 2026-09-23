@@ -260,13 +260,23 @@ function statusText() {
   return `Копия от ${stamp}.${offline}`;
 }
 
-function banner(iso) {
+function dateHero(iso) {
   const today = moscowIso();
   const dots = formatDots(iso);
   const todayDots = formatDots(today);
-  if (iso === today) return `<p class="banner today">Сегодня · ${esc(dots)}</p>`;
-  const kind = iso === addDays(today, 1) ? "Завтра" : "Выбранная дата";
-  return `<p class="banner other"><span>${kind} · ${esc(dots)}. Сегодня ${esc(todayDots)}.</span><button type="button" class="text-btn" data-action="go-today">К сегодня</button></p>`;
+  const week = state.mode === "week";
+  let kicker = `<p class="kicker">${week ? "Неделя" : "Сегодня"}</p>`;
+  let back = "";
+  if (iso !== today) {
+    const kind = week ? "Неделя" : iso === addDays(today, 1) ? "Завтра" : "Выбранная дата";
+    kicker = `<p class="kicker warn">${kind} · сегодня ${esc(todayDots)}</p>`;
+    back = `<button type="button" class="text-btn" data-action="go-today">К сегодня</button>`;
+  }
+  const title = week
+    ? `<h1 class="hero-date hero-range">${esc(formatDots(mondayOf(iso)))} – ${esc(formatDots(addDays(mondayOf(iso), 6)))}</h1>`
+    : `<h1 class="hero-date">${esc(dots)}</h1>`;
+  const sub = week ? `<p class="weekday">${esc(weekdayName(mondayOf(iso)))} – ${esc(weekdayName(addDays(mondayOf(iso), 6)))}</p>` : `<p class="weekday">${esc(weekdayName(iso))}</p>`;
+  return `<div class="hero">${kicker}${title}${sub}${back}</div>`;
 }
 
 function lessonCard(iso, lesson) {
@@ -277,23 +287,31 @@ function lessonCard(iso, lesson) {
     lesson.subgroup ? `<span class="chip">${esc(lesson.subgroup)}</span>` : "",
     phase === "now" ? `<span class="chip now">сейчас</span>` : "",
   ].join("");
-  const room = lesson.room
-    ? `<p class="room">ауд. <a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a></p>`
-    : "";
+  const bits = [];
+  if (lesson.teacher) bits.push(`<span>${esc(lesson.teacher)}</span>`);
+  if (lesson.room) {
+    if (bits.length) bits.push(`<span class="dot">·</span>`);
+    bits.push(`<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a>`);
+  }
   return `<article class="card ${esc(typeClass)} ${phase}">
-    <div class="meta"><span class="time">${esc(lesson.start)}–${esc(lesson.end)}</span>${chips}</div>
+    <div class="card-top">
+      <p class="time">${esc(lesson.start)}<span class="time-sep">–</span>${esc(lesson.end)}</p>
+      <div class="chips">${chips}</div>
+    </div>
     <h2 class="subject">${esc(lesson.subject)}</h2>
-    ${lesson.teacher ? `<p class="teacher">${esc(lesson.teacher)}</p>` : ""}
-    ${room}
+    ${bits.length ? `<p class="meta-line">${bits.join("")}</p>` : ""}
   </article>`;
 }
 
 function dayBody(iso) {
   const day = dayByDate(iso);
   if (!day) {
-    return `<div class="empty"><p>На ${esc(formatDots(iso))} в сохранённой копии нет расписания. Нажмите «Обновить» или попросите сопровождающего запустить скрипт для этой даты.</p></div>`;
+    if (state.loading) {
+      return `<div class="card skeleton"></div><div class="card skeleton"></div><div class="card skeleton"></div>`;
+    }
+    return `<div class="empty"><p class="empty-title">Нет копии на ${esc(formatDots(iso))}</p><p>Нажмите «Обновить» или добавьте эту дату скриптом.</p></div>`;
   }
-  if (!day.lessons.length) return `<div class="empty"><p>Нет пар.</p></div>`;
+  if (!day.lessons.length) return `<div class="empty"><p class="empty-title">Нет пар</p><p>В этот день занятий нет.</p></div>`;
   return day.lessons.map((lesson) => lessonCard(iso, lesson)).join("");
 }
 
@@ -302,7 +320,8 @@ function dateControls(iso) {
   const months = monthNames()
     .map((name, index) => `<option value="${index + 1}" ${index + 1 === parts.month ? "selected" : ""}>${esc(name)}</option>`)
     .join("");
-  return `<form data-date-form>
+  return `<form class="date-card" data-date-form>
+    <div class="date-card-head"><p>Другая дата</p><strong>${esc(formatDots(iso))}</strong></div>
     <div class="date-nav">
       <button class="shift" type="button" data-action="shift-day" data-delta="-1" aria-label="Предыдущий день">‹</button>
       <div class="date-grid">
@@ -320,9 +339,6 @@ function dateControls(iso) {
 function scheduleView() {
   const iso = activeIso();
   const week = state.mode === "week";
-  const heading = week
-    ? `Неделя ${formatDots(mondayOf(iso))}–${formatDots(addDays(mondayOf(iso), 6))}`
-    : `${weekdayName(iso)}, ${formatDots(iso)}`;
   let body = "";
   if (week) {
     const start = mondayOf(iso);
@@ -339,15 +355,14 @@ function scheduleView() {
   } else {
     body = `<div class="lessons">${dayBody(iso)}</div>`;
   }
-  return `<section class="panel">
-    ${banner(iso)}
-    <h1>${esc(heading)}</h1>
-  </section>
+  return `${dateHero(iso)}
   ${body}
   <section class="panel">
     ${dateControls(iso)}
-    <p class="status" role="status">${esc(statusText())}</p>
-    <button class="ghost" type="button" data-action="refresh">Обновить</button>
+    <div class="status-row">
+      <p class="status" role="status">${esc(statusText())}</p>
+      <button class="text-btn" type="button" data-action="refresh">Обновить</button>
+    </div>
   </section>
   ${installTip()}`;
 }
@@ -408,8 +423,9 @@ function suggestHtml(query) {
 function pickerHtml() {
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="picker-title">
     <div class="sheet-card">
+      <div class="grabber"></div>
       <h2 id="picker-title">Группа</h2>
-      <p class="lead">Введите код любой группы ВГЛТУ. Например, ${esc(DEFAULT_GROUP)}.</p>
+      <p class="lead">Любой код ВГЛТУ. Например, ${esc(DEFAULT_GROUP)}.</p>
       <form data-group-form>
         <label class="field">Код группы
           <input class="search" id="group-query" name="group" value="${esc(state.query)}" autocomplete="off" autocapitalize="characters" enterkeyhint="search" />
@@ -422,6 +438,17 @@ function pickerHtml() {
   </div>`;
 }
 
+function navIcon(name) {
+  const common = `viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"`;
+  const paths = {
+    today: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/><circle cx="12" cy="15" r="1.3" fill="currentColor" stroke="none"/>`,
+    tomorrow: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M10 15h4"/>`,
+    week: `<path d="M5 7h14M5 12h14M5 17h9"/>`,
+    more: `<circle cx="6" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.2" fill="currentColor" stroke="none"/>`,
+  };
+  return `<svg ${common}>${paths[name]}</svg>`;
+}
+
 function nav() {
   const items = [
     ["today", "Сегодня"],
@@ -430,7 +457,7 @@ function nav() {
     ["more", "Ещё"],
   ];
   return `<nav class="nav">${items
-    .map(([mode, label]) => `<button type="button" data-action="mode" data-mode="${mode}" ${state.mode === mode ? 'aria-current="page"' : ""}>${label}</button>`)
+    .map(([mode, label]) => `<button type="button" data-action="mode" data-mode="${mode}" ${state.mode === mode ? 'aria-current="page"' : ""}>${navIcon(mode)}${label}</button>`)
     .join("")}</nav>`;
 }
 
@@ -438,19 +465,20 @@ function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
   const main = !state.group
-    ? `<section class="panel"><h1>Выберите группу</h1><p class="status">Начните вводить код, например ${esc(DEFAULT_GROUP)}. Расписание сохранится на этом телефоне.</p></section>`
+    ? `<section class="hero"><p class="kicker">Сначала группа</p><h1 class="hero-date hero-range">Выберите код</h1><p class="weekday">Например ${esc(DEFAULT_GROUP)}. Расписание останется на этом телефоне.</p></section>`
     : state.mode === "more"
       ? moreView()
       : scheduleView();
   app.innerHTML = `<header class="top">
       <div class="top-row">
         <div>
+          <p class="eyebrow">ВГЛТУ</p>
           <p class="brand">Пары</p>
-          <p class="sub">Расписание ВГЛТУ</p>
         </div>
-        <button class="group-btn" type="button" data-action="open-group">${esc(state.group || "Выбрать группу")}<small>сменить группу</small></button>
+        <button class="group-btn" type="button" data-action="open-group"><span class="group-kicker">группа</span><span class="group-code">${esc(state.group || "Выбрать")}</span></button>
       </div>
       ${offline}
+      ${state.loading ? `<div class="progress" aria-hidden="true"></div>` : ""}
     </header>
     <main>${main}</main>
     ${nav()}
