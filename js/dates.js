@@ -91,6 +91,31 @@ export function mondayOf(iso) {
   return addDays(iso, delta);
 }
 
+// Неделя в приложении заканчивается в воскресенье: в HTML расписания ВГЛТУ
+// воскресенье есть отдельным днём (часто «Нет пар.»), поэтому суббота не взята за конец.
+export function visibleWeekDays(anchorIso, todayIso) {
+  const end = addDays(mondayOf(anchorIso), 6);
+  let cursor = mondayOf(anchorIso);
+  if (cursor < todayIso) cursor = todayIso;
+  const days = [];
+  while (cursor <= end) {
+    days.push(cursor);
+    cursor = addDays(cursor, 1);
+  }
+  return days;
+}
+
+export function semesterRange(iso) {
+  const { year, month } = splitIso(iso);
+  if (month >= 9) {
+    return { from: `${year}-09-01`, to: `${year + 1}-01-31`, label: "Осенний семестр" };
+  }
+  if (month === 1) {
+    return { from: `${year - 1}-09-01`, to: `${year}-01-31`, label: "Осенний семестр" };
+  }
+  return { from: `${year}-02-01`, to: `${year}-08-31`, label: "Весенний семестр" };
+}
+
 export function weekdayName(iso) {
   const [year, month, day] = iso.split("-").map(Number);
   const noon = new Date(Date.UTC(year, month - 1, day, 9, 0, 0));

@@ -1,13 +1,26 @@
 import {
+  configuredWorkerUrl,
+  fetchAttendance,
+  loadSession,
+  loadSnapshot,
+  loginAttendance,
+  logoutAttendance,
+  saveSession,
+  saveSnapshot,
+  saveWorkerUrl,
+  clearSession,
+} from "./attendance.js";
+import {
   addDays,
   formatDots,
   formatStamp,
   isValidIso,
-  mondayOf,
   monthNames,
   moscowInstant,
   moscowIso,
+  semesterRange,
   splitIso,
+  visibleWeekDays,
   weekdayName,
 } from "./dates.js";
 import { parseScheduleHtml } from "./parse.js";
@@ -49,6 +62,15 @@ const state = {
   notifyNote: "",
   seenToday: "",
   lastRefresh: 0,
+  attendance: {
+    error: "",
+    loading: false,
+    scope: "semester",
+    from: "",
+    to: "",
+    snapshot: null,
+    session: null,
+  },
 };
 
 let refreshToken = 0;
@@ -265,17 +287,27 @@ function dateHero(iso) {
   const dots = formatDots(iso);
   const todayDots = formatDots(today);
   const week = state.mode === "week";
+  const days = week ? visibleWeekDays(iso, today) : [];
   let kicker = `<p class="kicker">${week ? "Неделя" : "Сегодня"}</p>`;
   let back = "";
-  if (iso !== today) {
+  const weekIsCurrent = week && days[0] === today;
+  if (!weekIsCurrent && iso !== today) {
     const kind = week ? "Неделя" : iso === addDays(today, 1) ? "Завтра" : "Выбранная дата";
     kicker = `<p class="kicker warn">${kind} · сегодня ${esc(todayDots)}</p>`;
     back = `<button type="button" class="text-btn" data-action="go-today">К сегодня</button>`;
   }
-  const title = week
-    ? `<h1 class="hero-date hero-range">${esc(formatDots(mondayOf(iso)))} – ${esc(formatDots(addDays(mondayOf(iso), 6)))}</h1>`
-    : `<h1 class="hero-date">${esc(dots)}</h1>`;
-  const sub = week ? `<p class="weekday">${esc(weekdayName(mondayOf(iso)))} – ${esc(weekdayName(addDays(mondayOf(iso), 6)))}</p>` : `<p class="weekday">${esc(weekdayName(iso))}</p>`;
+  let title = `<h1 class="hero-date">${esc(dots)}</h1>`;
+  let sub = `<p class="weekday">${esc(weekdayName(iso))}</p>`;
+  if (week && days.length > 1) {
+    title = `<h1 class="hero-date hero-range">${esc(formatDots(days[0]))} – ${esc(formatDots(days[days.length - 1]))}</h1>`;
+    sub = `<p class="weekday">${esc(weekdayName(days[0]))} – ${esc(weekdayName(days[days.length - 1]))}</p>`;
+  } else if (week && days.length === 1) {
+    title = `<h1 class="hero-date">${esc(formatDots(days[0]))}</h1>`;
+    sub = `<p class="weekday">${esc(weekdayName(days[0]))}</p>`;
+  } else if (week) {
+    title = `<h1 class="hero-date hero-range">Неделя прошла</h1>`;
+    sub = `<p class="weekday">Дни до сегодняшнего по Москве не показываем</p>`;
+  }
   return `<div class="hero">${kicker}${title}${sub}${back}</div>`;
 }
 
@@ -320,16 +352,17 @@ function dateControls(iso) {
   const months = monthNames()
     .map((name, index) => `<option value="${index + 1}" ${index + 1 === parts.month ? "selected" : ""}>${esc(name)}</option>`)
     .join("");
+  const monthLabel = monthNames()[parts.month - 1] || "";
   return `<form class="date-card" data-date-form>
-    <div class="date-card-head"><p>Другая дата</p><strong>${esc(formatDots(iso))}</strong></div>
-    <div class="date-nav">
+    <div class="date-card-head">
       <button class="shift" type="button" data-action="shift-day" data-delta="-1" aria-label="Предыдущий день">‹</button>
-      <div class="date-grid">
-        <label class="field">День<input id="day" name="day" inputmode="numeric" min="1" max="31" value="${parts.day}" required /></label>
-        <label class="field">Месяц<select id="month" name="month">${months}</select></label>
-        <label class="field">Год<input id="year" name="year" inputmode="numeric" min="2020" max="2036" value="${parts.year}" required /></label>
-      </div>
+      <div><p>Другая дата</p><strong>${esc(formatDots(iso))}</strong></div>
       <button class="shift" type="button" data-action="shift-day" data-delta="1" aria-label="Следующий день">›</button>
+    </div>
+    <div class="date-grid">
+      <label class="field">День<input id="day" name="day" inputmode="numeric" min="1" max="31" value="${parts.day}" required /></label>
+      <label class="field">Год<input id="year" name="year" inputmode="numeric" min="2020" max="2036" value="${parts.year}" required /></label>
+      <label class="field field-month">Месяц<select id="month" name="month" title="${esc(monthLabel)}">${months}</select></label>
     </div>
     ${state.dateError ? `<p class="date-error">${esc(state.dateError)}</p>` : ""}
     <button class="primary" type="submit">Показать эту дату</button>
@@ -341,17 +374,20 @@ function scheduleView() {
   const week = state.mode === "week";
   let body = "";
   if (week) {
-    const start = mondayOf(iso);
-    const days = [];
-    for (let index = 0; index < 7; index += 1) {
-      const dayIso = addDays(start, index);
-      const todayMark = dayIso === moscowIso() ? ` <span class="chip">сегодня</span>` : "";
-      days.push(`<section>
+    const days = visibleWeekDays(iso, moscowIso());
+    if (!days.length) {
+      body = `<div class="week"><div class="empty"><p class="empty-title">Нет дней впереди</p><p>До сегодняшнего по Москве эта неделя уже прошла.</p></div></div>`;
+    } else {
+      body = `<div class="week">${days
+        .map((dayIso) => {
+          const todayMark = dayIso === moscowIso() ? ` <span class="chip">сегодня</span>` : "";
+          return `<section>
         <h2><button type="button" class="day-jump" data-action="open-day" data-date="${esc(dayIso)}">${esc(weekdayName(dayIso))}, ${esc(formatDots(dayIso))}</button>${todayMark}</h2>
         ${dayBody(dayIso)}
-      </section>`);
+      </section>`;
+        })
+        .join("")}</div>`;
     }
-    body = `<div class="week">${days.join("")}</div>`;
   } else {
     body = `<div class="lessons">${dayBody(iso)}</div>`;
   }
@@ -377,10 +413,107 @@ function installTip() {
   </aside>`;
 }
 
+function attendanceRange() {
+  const today = moscowIso();
+  if (state.attendance.scope === "dates" && isValidIso(state.attendance.from) && isValidIso(state.attendance.to)) {
+    return { scope: "dates", label: "Выбранные даты", from: state.attendance.from, to: state.attendance.to };
+  }
+  return { scope: "semester", ...semesterRange(today) };
+}
+
+function attendanceDaysHtml(snapshot) {
+  if (!snapshot?.days?.length) {
+    return `<div class="empty"><p class="empty-title">Нет отметок</p><p>За этот период кабинет ничего не вернул.</p></div>`;
+  }
+  return snapshot.days
+    .map((day) => {
+      const rows = (day.subjects || [])
+        .map((subject) => {
+          const mark = subject.mark === "absent" ? "Нет" : subject.mark === "present" ? "Был" : "—";
+          const markClass = subject.mark === "absent" ? "abs" : subject.mark === "present" ? "ok" : "";
+          return `<article class="att-card ${subject.mark === "absent" ? "abs" : ""}">
+            <div class="att-top"><h3>${esc(subject.name || "Занятие")}</h3><span class="mark ${markClass}">${mark}</span></div>
+            ${subject.type ? `<p class="meta-line">${esc(subject.type)}</p>` : ""}
+          </article>`;
+        })
+        .join("");
+      const label = isValidIso(day.date) ? formatDots(day.date) : day.date;
+      return `<section class="att-day"><h3>${esc(label)}</h3>${rows || `<p class="status">Нет занятий</p>`}</section>`;
+    })
+    .join("");
+}
+
+function attendanceBlock() {
+  const session = state.attendance.session;
+  const snapshot = state.attendance.snapshot;
+  const range = attendanceRange();
+  const worker = configuredWorkerUrl();
+  const absences = (snapshot?.days || []).reduce(
+    (sum, day) => sum + (day.subjects || []).filter((subject) => subject.mark === "absent").length,
+    0,
+  );
+  const warning = `<p class="warn-note">Пароль не сохраняется на телефоне. Он один раз уходит на ваш Worker и сразу пересылается только на vgltu.ru. Чужой адрес вставлять нельзя. «Выйти» стирает сессию.</p>`;
+  const copy = snapshot?.fetchedAt
+    ? `<p class="status">Копия от ${esc(formatStamp(snapshot.fetchedAt))}${snapshot.login ? ` · ID ${esc(snapshot.login)}` : ""}.${navigator.onLine ? "" : " Нет сети."}</p>`
+    : "";
+  const journal = snapshot ? `<p class="status">${esc(snapshot.label || "Журнал")} · ${esc(formatDotsSafe(snapshot.from))} – ${esc(formatDotsSafe(snapshot.to))}. Пропусков: ${absences}.</p>${state.attendance.loading ? `<div class="card skeleton"></div>` : attendanceDaysHtml(snapshot)}${copy}` : "";
+  if (!session) {
+    return `<article class="block">
+      <h2>Посещаемость</h2>
+      <p>Журнал как в личном кабинете: за семестр или за выбранные даты. Браузер с GitHub Pages сам на vgltu.ru не ходит, поэтому нужен ваш бесплатный Cloudflare Worker.</p>
+      <form data-worker-form>
+        <label class="field">Адрес Worker
+          <input id="worker-url" name="worker" value="${esc(worker)}" placeholder="https://имя.workers.dev" autocomplete="off" spellcheck="false" />
+        </label>
+        <button class="ghost" type="submit">Сохранить адрес</button>
+      </form>
+      <form data-attendance-form>
+        <label class="field">ID студента
+          <input name="login" autocomplete="username" inputmode="text" required />
+        </label>
+        <label class="field">Пароль
+          <input name="password" type="password" autocomplete="current-password" required />
+        </label>
+        ${warning}
+        ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
+        <button class="primary" type="submit">${state.attendance.loading ? "Входим…" : "Войти"}</button>
+      </form>
+      ${journal}
+      <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть посещаемость на vgltu.ru</a></p>
+    </article>`;
+  }
+  const dates = state.attendance.scope === "dates"
+    ? `<label class="field">С даты<input id="att-from" type="date" value="${esc(state.attendance.from)}" /></label>
+       <label class="field">По дату<input id="att-to" type="date" value="${esc(state.attendance.to)}" /></label>
+       <button class="ghost" type="button" data-action="att-apply">Показать даты</button>`
+    : "";
+  return `<article class="block">
+    <h2>Посещаемость</h2>
+    <p class="status">ID ${esc(session.login)}. Сессия только на этом телефоне, пароль не сохранён.</p>
+    <div class="seg">
+      <button type="button" data-action="att-scope" data-scope="semester" aria-pressed="${state.attendance.scope === "semester" ? "true" : "false"}">Семестр</button>
+      <button type="button" data-action="att-scope" data-scope="dates" aria-pressed="${state.attendance.scope === "dates" ? "true" : "false"}">Даты</button>
+    </div>
+    ${dates}
+    <p class="status">${esc(range.label)} · ${esc(formatDots(range.from))} – ${esc(formatDots(range.to))}</p>
+    ${warning}
+    ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
+    ${state.attendance.loading && !snapshot ? `<div class="card skeleton"></div><div class="card skeleton"></div>` : journal}
+    <button class="primary" type="button" data-action="att-refresh">Обновить</button>
+    <button class="ghost" type="button" data-action="att-logout">Выйти</button>
+    <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть на vgltu.ru</a></p>
+  </article>`;
+}
+
+function formatDotsSafe(iso) {
+  return isValidIso(iso) ? formatDots(iso) : String(iso || "");
+}
+
 function moreView() {
   const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
+    ${attendanceBlock()}
     <article class="block">
       <h2>Напоминание</h2>
       <p>За 10 минут до следующей пары, пока приложение открыто. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
@@ -396,12 +529,6 @@ function moreView() {
       </ol>
       ${state.installEvent ? `<button class="primary" type="button" data-action="install">Установить</button>` : ""}
       <p>${state.swReady ? "Офлайн-копия приложения сохранена." : "После первой загрузки с сетью расписание откроется и без интернета."}</p>
-    </article>
-    <article class="block">
-      <h2>Посещаемость</h2>
-      <p class="soon">Скоро</p>
-      <p>Отметку сюда ещё не подключали. Пароль от личного кабинета приложение не спрашивает и не хранит.</p>
-      <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть посещаемость на vgltu.ru</a></p>
     </article>
     <article class="block">
       <h2>Откуда пары</h2>
@@ -487,6 +614,11 @@ function render() {
 
 function ensure(iso) {
   if (!dayByDate(iso)) refresh(iso, true);
+}
+
+function ensureWeek() {
+  const days = visibleWeekDays(activeIso(), moscowIso());
+  if (days.some((iso) => !dayByDate(iso))) refresh(days[0], true);
 }
 
 function goToday() {
@@ -580,16 +712,11 @@ app.addEventListener("click", (event) => {
     } else if (mode === "week") {
       state.mode = "week";
       render();
-      const start = mondayOf(activeIso());
-      for (let index = 0; index < 7; index += 1) {
-        if (!dayByDate(addDays(start, index))) {
-          refresh(start, true);
-          break;
-        }
-      }
+      ensureWeek();
     } else {
       state.mode = "more";
       render();
+      if (state.attendance.session && navigator.onLine) refreshAttendance();
     }
   } else if (action === "go-today") goToday();
   else if (action === "shift-day") {
@@ -599,17 +726,24 @@ app.addEventListener("click", (event) => {
     if (state.mode === "today" || state.mode === "tomorrow") state.mode = "day";
     state.dateError = "";
     render();
-    if (state.mode === "week") {
-      const start = mondayOf(next);
-      const missing = [0, 1, 2, 3, 4, 5, 6].some((index) => !dayByDate(addDays(start, index)));
-      if (missing) refresh(start, true);
-    } else if (!dayByDate(next)) refresh(next, true);
+    if (state.mode === "week") ensureWeek();
+    else if (!dayByDate(next)) refresh(next, true);
   } else if (action === "open-day") {
     state.follow = "none";
     state.anchor = button.dataset.date;
     state.mode = "day";
     render();
-  } else if (action === "refresh") refresh(state.mode === "week" ? mondayOf(activeIso()) : activeIso(), true);
+  } else if (action === "refresh") {
+    const days = visibleWeekDays(activeIso(), moscowIso());
+    refresh(state.mode === "week" && days.length ? days[0] : activeIso(), true);
+  } else if (action === "att-scope") {
+    state.attendance.scope = button.dataset.scope === "dates" ? "dates" : "semester";
+    state.attendance.error = "";
+    render();
+    if (state.attendance.scope === "semester" && state.attendance.session) refreshAttendance();
+  } else if (action === "att-apply") applyAttendanceDates();
+  else if (action === "att-refresh") refreshAttendance();
+  else if (action === "att-logout") signOutAttendance();
   else if (action === "open-group") {
     state.query = state.group || DEFAULT_GROUP;
     state.pickerOpen = true;
@@ -652,6 +786,16 @@ app.addEventListener("submit", (event) => {
   } else if (event.target.matches("[data-group-form]")) {
     event.preventDefault();
     commitGroup(state.query);
+  } else if (event.target.matches("[data-worker-form]")) {
+    event.preventDefault();
+    const saved = saveWorkerUrl(event.target.worker.value);
+    state.attendance.error = saved == null
+      ? "Нужен https-адрес на .workers.dev, localhost или адрес из js/config.js."
+      : "";
+    render();
+  } else if (event.target.matches("[data-attendance-form]")) {
+    event.preventDefault();
+    submitAttendance(event.target);
   }
 });
 
@@ -683,8 +827,117 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+let attendanceToken = 0;
+
+function applyAttendanceDates() {
+  const from = document.getElementById("att-from")?.value || "";
+  const to = document.getElementById("att-to")?.value || "";
+  if (!isValidIso(from) || !isValidIso(to) || from > to) {
+    state.attendance.error = "Проверьте даты периода.";
+    render();
+    return;
+  }
+  state.attendance.from = from;
+  state.attendance.to = to;
+  state.attendance.scope = "dates";
+  state.attendance.error = "";
+  refreshAttendance();
+}
+
+async function submitAttendance(form) {
+  const login = form.login.value.trim();
+  const password = form.password.value;
+  form.password.value = "";
+  const worker = configuredWorkerUrl();
+  if (!worker) {
+    state.attendance.error = "Сначала сохраните адрес своего Cloudflare Worker.";
+    render();
+    return;
+  }
+  state.attendance.loading = true;
+  state.attendance.error = "";
+  render();
+  try {
+    const result = await loginAttendance(worker, login, password);
+    saveSession({ login: result.login, token: result.token, savedAt: new Date().toISOString() });
+    state.attendance.session = loadSession();
+    state.attendance.loading = false;
+    await refreshAttendance();
+  } catch (error) {
+    state.attendance.loading = false;
+    state.attendance.error = error.message || "Не удалось войти";
+    if (state.mode === "more") render();
+  }
+}
+
+async function refreshAttendance() {
+  const token = ++attendanceToken;
+  const session = state.attendance.session;
+  const worker = configuredWorkerUrl();
+  if (!session || !worker) {
+    state.attendance.error = worker ? "Сначала войдите." : "Сначала сохраните адрес своего Cloudflare Worker.";
+    if (state.mode === "more") render();
+    return;
+  }
+  if (!navigator.onLine) {
+    state.attendance.error = "Нет сети. Показана последняя копия.";
+    if (state.mode === "more") render();
+    return;
+  }
+  const range = attendanceRange();
+  if (range.from > range.to) {
+    state.attendance.error = "Дата «с» позже даты «по».";
+    render();
+    return;
+  }
+  state.attendance.loading = true;
+  state.attendance.error = "";
+  if (state.mode === "more") render();
+  try {
+    const result = await fetchAttendance(worker, session.token, range.from, range.to);
+    if (token !== attendanceToken) return;
+    const snapshot = {
+      login: session.login,
+      fetchedAt: new Date().toISOString(),
+      label: range.label,
+      from: range.from,
+      to: range.to,
+      days: result.days,
+    };
+    saveSnapshot(snapshot);
+    state.attendance.snapshot = snapshot;
+  } catch (error) {
+    if (token !== attendanceToken) return;
+    if (error.code === "unauthorized") {
+      clearSession();
+      state.attendance.session = null;
+    }
+    state.attendance.error = error.message || "Не удалось обновить посещаемость";
+    state.attendance.snapshot = loadSnapshot();
+  }
+  state.attendance.loading = false;
+  if (state.mode === "more") render();
+}
+
+async function signOutAttendance() {
+  const session = state.attendance.session;
+  const worker = configuredWorkerUrl();
+  attendanceToken += 1;
+  if (session && worker) logoutAttendance(worker, session.token);
+  clearSession();
+  state.attendance.session = null;
+  state.attendance.loading = false;
+  state.attendance.error = "";
+  render();
+}
+
 async function boot() {
   state.seenToday = moscowIso();
+  const semester = semesterRange(state.seenToday);
+  state.attendance.from = semester.from;
+  state.attendance.to = state.seenToday;
+  state.attendance.session = loadSession();
+  state.attendance.snapshot = loadSnapshot();
   state.groups = await loadGroups();
   state.group = loadGroup();
   state.query = state.group || DEFAULT_GROUP;

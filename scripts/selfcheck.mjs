@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, weekdayName } from "../js/dates.js";
+import { markOf, normalizeAttendance, normalizeWorkerUrl } from "../js/attendance.js";
+import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
+import { dateAttempts } from "../worker/src/index.js";
 import { parseScheduleHtml } from "../js/parse.js";
 
 assert.equal(moscowIso(new Date("2026-09-22T21:00:00.000Z")), "2026-09-23");
@@ -14,6 +16,48 @@ assert.equal(isValidIso("2026-02-29"), false);
 assert.equal(isValidIso("2028-02-29"), true);
 assert.equal(isValidIso("2026-04-31"), false);
 assert.equal(weekdayName("2026-09-23"), "среда");
+assert.deepEqual(visibleWeekDays("2026-09-23", "2026-09-23"), [
+  "2026-09-23",
+  "2026-09-24",
+  "2026-09-25",
+  "2026-09-26",
+  "2026-09-27",
+]);
+assert.deepEqual(visibleWeekDays("2026-09-21", "2026-09-23"), [
+  "2026-09-23",
+  "2026-09-24",
+  "2026-09-25",
+  "2026-09-26",
+  "2026-09-27",
+]);
+assert.equal(weekdayName("2026-09-27"), "воскресенье");
+assert.deepEqual(visibleWeekDays("2026-09-27", "2026-09-27"), ["2026-09-27"]);
+assert.deepEqual(visibleWeekDays("2026-09-30", "2026-09-23"), [
+  "2026-09-28",
+  "2026-09-29",
+  "2026-09-30",
+  "2026-10-01",
+  "2026-10-02",
+  "2026-10-03",
+  "2026-10-04",
+]);
+assert.deepEqual(visibleWeekDays("2026-09-14", "2026-09-23"), []);
+assert.deepEqual(semesterRange("2026-09-23"), {
+  from: "2026-09-01",
+  to: "2027-01-31",
+  label: "Осенний семестр",
+});
+assert.equal(semesterRange("2026-03-02").label, "Весенний семестр");
+assert.equal(markOf("0"), "absent");
+assert.equal(markOf(null), "none");
+assert.equal(markOf("1"), "present");
+assert.equal(normalizeAttendance({
+  gotData: true,
+  data: [{ date: "23.09.2026", subjects: [{ name: "Экономика", type: "лек", go: "0" }] }],
+})[0].subjects[0].mark, "absent");
+assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
+assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
+assert.deepEqual(dateAttempts("2026-09-23"), ["23.09.2026", "2026-09-23"]);
 assert.equal(moscowInstant("2026-09-23", "13:40").toISOString(), "2026-09-23T10:40:00.000Z");
 
 const fixture = `
