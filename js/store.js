@@ -1,5 +1,8 @@
 const GROUP_KEY = "rasp.group";
 const DATA_CACHE = "rasp-data-v1";
+const RECENT_KEY = "rasp.recent";
+const RECORD_PREFIX = "rasp.schedule:";
+export const RECENT_LIMIT = 10;
 
 export function loadGroup() {
   return localStorage.getItem(GROUP_KEY) || "";
@@ -37,7 +40,67 @@ export function saveSubgroup(value) {
 }
 
 function recordKey(group) {
-  return `rasp.schedule:${group}`;
+  return `${RECORD_PREFIX}${group}`;
+}
+
+function recordUrl(group) {
+  return new URL(`./data/schedules/${encodeURIComponent(group)}.json`, location.href);
+}
+
+function storedRecordGroups() {
+  const groups = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key && key.startsWith(RECORD_PREFIX)) groups.push(key.slice(RECORD_PREFIX.length));
+  }
+  return groups;
+}
+
+// Последние открытые группы: их расписание храним офлайн, остальное удаляем.
+export function loadRecent() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_KEY) || "null");
+    if (Array.isArray(saved)) return saved.map(String).filter(Boolean).slice(0, RECENT_LIMIT);
+  } catch {
+    /* Повреждённый список собираем заново. */
+  }
+  const current = loadGroup();
+  const known = storedRecordGroups()
+    .map((group) => ({ group, time: fetchedTime(loadRecord(group)) }))
+    .sort((a, b) => b.time - a.time)
+    .map((item) => item.group);
+  return [...new Set([current, ...known].filter(Boolean))].slice(0, RECENT_LIMIT);
+}
+
+function forgetRecord(group) {
+  localStorage.removeItem(recordKey(group));
+  try {
+    caches
+      .open(DATA_CACHE)
+      .then((cache) => cache.delete(recordUrl(group)))
+      .catch(() => {});
+  } catch {
+    /* Cache API может быть недоступен. */
+  }
+}
+
+function pruneRecords(keep) {
+  const allowed = new Set(keep);
+  for (const group of storedRecordGroups()) {
+    if (!allowed.has(group)) forgetRecord(group);
+  }
+}
+
+export function rememberRecent(group) {
+  if (!group) return loadRecent();
+  const list = [group, ...loadRecent().filter((item) => item !== group)].slice(0, RECENT_LIMIT);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    /* Память может быть заполнена — ниже освободим место. */
+  }
+  pruneRecords([...list, loadGroup()]);
+  return list;
 }
 
 export function loadRecord(group) {
@@ -72,12 +135,37 @@ export function mergeRecords(base, incoming) {
   };
 }
 
+function writeRecord(group, text) {
+  try {
+    localStorage.setItem(recordKey(group), text);
+    return;
+  } catch {
+    /* Не влезло: освобождаем место от самых старых групп и пробуем ещё раз. */
+  }
+  const keep = [loadGroup(), group];
+  const recent = loadRecent().filter((item) => !keep.includes(item));
+  while (recent.length) {
+    forgetRecord(recent.pop());
+    try {
+      localStorage.setItem(recordKey(group), text);
+      return;
+    } catch {
+      /* Дальше удаляем следующую. */
+    }
+  }
+  try {
+    localStorage.setItem(recordKey(group), text);
+  } catch {
+    /* Остаётся копия в Cache API ниже. */
+  }
+}
+
 export async function saveRecord(group, record) {
   const payload = { ...record, group };
-  localStorage.setItem(recordKey(group), JSON.stringify(payload));
+  writeRecord(group, JSON.stringify(payload));
   try {
     const cache = await caches.open(DATA_CACHE);
-    const url = new URL(`./data/schedules/${encodeURIComponent(group)}.json`, location.href);
+    const url = recordUrl(group);
     await cache.put(
       url,
       new Response(JSON.stringify(payload), {
@@ -93,10 +181,10 @@ export async function saveRecord(group, record) {
 export async function readCachedRecord(group) {
   try {
     const cache = await caches.open(DATA_CACHE);
-    const url = new URL(`./data/schedules/${encodeURIComponent(group)}.json`, location.href);
-    const response = await cache.match(url);
+    const response = await cache.match(recordUrl(group));
     if (!response) return null;
-    return await response.json();
+    const record = await response.json();
+    return Array.isArray(record?.days) ? record : null;
   } catch {
     return null;
   }

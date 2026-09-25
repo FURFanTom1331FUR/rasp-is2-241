@@ -16,6 +16,7 @@ import {
   formatDots,
   formatStamp,
   isValidIso,
+  mondayOf,
   monthNames,
   moscowInstant,
   moscowIso,
@@ -28,7 +29,6 @@ import { fetchText } from "./net.js";
 import {
   lessonMatchesSubgroup,
   lessonSubgroup,
-  parseScheduleHtml,
   subjectMatchesSubgroup,
   subjectSubgroup,
   subgroupBadgeLabel,
@@ -38,18 +38,26 @@ import {
   loadGroup,
   loadInstallDismissed,
   loadNotify,
+  loadRecent,
   loadRecord,
   loadSubgroup,
   mergeRecords,
   readCachedRecord,
+  rememberRecent,
   saveGroup,
   saveNotify,
   saveRecord,
   saveSubgroup,
 } from "./store.js";
 
-const LIVE_SCHEDULE = "https://kis.vgltu.ru/schedule";
-const LIVE_GROUPS = "https://kis.vgltu.ru/list?type=Group";
+// Прокси на том же домене (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
+const LIVE_SCHEDULE = "./schedule";
+const LIVE_GROUPS = "./groups";
+const LIVE_WINDOWS = 2;
+const LIVE_TIMEOUT_MS = 12000;
+const GROUPS_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const PREFETCH_EVERY_MS = 6 * 60 * 60 * 1000;
+const PREFETCH_GAP_MS = 1500;
 const DEFAULT_GROUP = "ИС2-241-ОБ";
 const LEAD_MS = 10 * 60 * 1000;
 
@@ -68,7 +76,7 @@ const state = {
   dateError: "",
   subgroup: "all",
   loading: false,
-  liveBlocked: false,
+  liveIssue: "",
   swReady: false,
   installEvent: null,
   notifyNote: "",
@@ -203,10 +211,17 @@ function groupsFromStorage() {
   return [DEFAULT_GROUP, "ИС2-242-ОБ", "ИС2-243-ОБ", "ИС2-244-ОБ"];
 }
 
-function rememberGroups(groups) {
+function groupsStamp() {
+  const value = Date.parse(localStorage.getItem("rasp.groupsAt") || "");
+  return Number.isNaN(value) ? 0 : value;
+}
+
+function rememberGroups(groups, fetchedAt) {
   state.groups = groups;
   try {
     localStorage.setItem("rasp.groups", JSON.stringify(groups));
+    const stamp = Date.parse(fetchedAt || "");
+    localStorage.setItem("rasp.groupsAt", new Date(Number.isNaN(stamp) ? Date.now() : stamp).toISOString());
   } catch {
     /* Память телефона может быть заполнена. */
   }
@@ -214,40 +229,68 @@ function rememberGroups(groups) {
   if (list && state.pickerOpen) list.innerHTML = suggestHtml(state.query);
 }
 
+async function loadGroupList(url, ms) {
+  const response = await fetchText(url, {}, ms);
+  if (!response.ok) return null;
+  const data = JSON.parse(response.text);
+  const groups = Array.isArray(data) ? data : data.groups;
+  if (!Array.isArray(groups) || !groups.length) return null;
+  return { groups: groups.map(String), fetchedAt: Array.isArray(data) ? "" : data.fetchedAt };
+}
+
 async function refreshGroups() {
+  const stamp = groupsStamp();
   try {
-    const response = await fetchText("./data/groups.json");
-    if (response.ok) {
-      const data = JSON.parse(response.text);
-      const groups = data.groups || data;
-      if (Array.isArray(groups) && groups.length) rememberGroups(groups.map(String));
-    }
+    const bundled = await loadGroupList("./data/groups.json");
+    const bundledAt = Date.parse(bundled?.fetchedAt || "");
+    if (bundled && (!stamp || state.groups.length < 10 || bundledAt > stamp)) rememberGroups(bundled.groups, bundled.fetchedAt);
   } catch {
     /* Список в памяти телефона остаётся. */
   }
+  if (!navigator.onLine || Date.now() - groupsStamp() < GROUPS_MAX_AGE_MS) return;
   try {
-    const response = await fetchText(LIVE_GROUPS);
-    if (response.ok) {
-      const data = JSON.parse(response.text);
-      if (Array.isArray(data) && data.length) rememberGroups(data.map(String));
-    }
+    const live = await loadGroupList(LIVE_GROUPS, LIVE_TIMEOUT_MS);
+    if (live) rememberGroups(live.groups, live.fetchedAt);
   } catch {
-    /* Сайт ВГЛТУ без CORS или соединение зависло. */
+    /* Нет связи или ВГЛТУ не ответил — список в памяти телефона остаётся. */
   }
 }
 
+class LiveError extends Error {
+  constructor(kind) {
+    super(kind);
+    this.kind = kind;
+  }
+}
+
+// Окно с понедельника недели: текущая и ещё три недели вперёд одним запросом.
 async function fetchLive(group, iso) {
-  const url = `${LIVE_SCHEDULE}?date=${iso}&group=${encodeURIComponent(group)}`;
-  const response = await fetchText(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const days = parseScheduleHtml(response.text);
-  if (!days.length) throw new Error("empty");
+  const url = `${LIVE_SCHEDULE}?date=${mondayOf(iso)}&group=${encodeURIComponent(group)}&windows=${LIVE_WINDOWS}`;
+  let response;
+  try {
+    response = await fetchText(url, {}, LIVE_TIMEOUT_MS);
+  } catch {
+    throw new LiveError("offline");
+  }
+  let data = null;
+  try {
+    data = JSON.parse(response.text);
+  } catch {
+    data = null;
+  }
+  // Не JSON (ответ service worker «нет копии», обрыв) — до сервера не достучались.
+  if (!data || typeof data !== "object") throw new LiveError("offline");
+  if (!response.ok || !Array.isArray(data.days) || !data.days.length) throw new LiveError("upstream");
+  const fallback = response.headers?.get?.("X-Rasp-Fallback") || "";
   return {
-    group,
-    fetchedAt: new Date().toISOString(),
-    source: LIVE_SCHEDULE,
-    origin: "live",
-    days,
+    issue: fallback === "offline" || fallback === "upstream" ? fallback : data.stale ? "upstream" : "",
+    record: {
+      group,
+      fetchedAt: data.fetchedAt || new Date().toISOString(),
+      source: data.source || "https://kis.vgltu.ru/schedule",
+      origin: "live",
+      days: data.days,
+    },
   };
 }
 
@@ -275,7 +318,9 @@ async function refresh(iso, force) {
   state.loading = true;
   render();
   const snapPromise = fetchSnapshot(group);
-  const livePromise = online ? fetchLive(group, iso).catch(() => null) : Promise.resolve(null);
+  const livePromise = online
+    ? fetchLive(group, iso).catch((error) => ({ issue: error?.kind || "offline", record: null }))
+    : Promise.resolve({ issue: "offline", record: null });
   const snap = await snapPromise;
   if (token !== refreshToken) return;
   if (snap) {
@@ -284,29 +329,66 @@ async function refresh(iso, force) {
   }
   const live = await livePromise;
   if (token !== refreshToken) return;
-  if (live) {
-    state.record = await saveRecord(group, mergeRecords(state.record, live));
-    state.liveBlocked = false;
-  } else if (!state.record?.fetchedAt) {
-    state.liveBlocked = true;
-  }
+  if (live.record) state.record = await saveRecord(group, mergeRecords(state.record, live.record));
+  state.liveIssue = live.issue || "";
   state.loading = false;
   render();
   planNotification(state.record);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// В фоне и по одной: недавние группы получают текущую и три следующие недели для офлайна.
+let prefetching = false;
+
+async function prefetchRecent() {
+  if (prefetching || !navigator.onLine) return;
+  const last = Number(localStorage.getItem("rasp.prefetchAt") || 0);
+  if (Date.now() - last < PREFETCH_EVERY_MS) return;
+  prefetching = true;
+  try {
+    localStorage.setItem("rasp.prefetchAt", String(Date.now()));
+    for (const group of loadRecent()) {
+      if (group === state.group) continue;
+      const saved = loadRecord(group);
+      const savedAt = Date.parse(saved?.fetchedAt || "");
+      if (saved?.origin === "live" && Date.now() - savedAt < PREFETCH_EVERY_MS) continue;
+      await sleep(PREFETCH_GAP_MS);
+      if (!navigator.onLine) return;
+      try {
+        const live = await fetchLive(group, moscowIso());
+        if (!live.issue && group !== state.group) await saveRecord(group, mergeRecords(loadRecord(group), live.record));
+      } catch (error) {
+        if (error?.kind === "offline") return;
+      }
+    }
+  } catch {
+    /* Предзагрузка необязательна. */
+  } finally {
+    prefetching = false;
+  }
+}
+
+function offlineNow() {
+  return !navigator.onLine || state.liveIssue === "offline";
+}
+
 function statusText() {
   if (state.loading) return "Обновляем расписание…";
-  const offline = navigator.onLine ? "" : " Нет сети: показано сохранённое расписание.";
   if (!state.record?.fetchedAt) {
-    const missing = state.liveBlocked
-      ? "Для этой группы нет сохранённой копии. Сайт ВГЛТУ не отдаёт расписание прямо в браузер (CORS)."
-      : "Расписание ещё не загружено.";
-    return missing + offline;
+    if (offlineNow()) {
+      return "Для этой группы ещё нет сохранённой копии. Откройте её, когда будет интернет — после этого она будет доступна офлайн.";
+    }
+    if (state.liveIssue === "upstream") return "Сайт ВГЛТУ не ответил, а сохранённой копии для этой группы ещё нет. Попробуйте «Обновить» чуть позже.";
+    return "Расписание ещё не загружено.";
   }
   const stamp = formatStamp(state.record.fetchedAt);
-  if (state.record.origin === "live") return `Обновлено с сайта ВГЛТУ ${stamp}.${offline}`;
-  return `Копия от ${stamp}.${offline}`;
+  if (offlineNow()) return `Нет связи с сервером — показано сохранённое расписание от ${stamp}.`;
+  if (state.liveIssue === "upstream") return `Сайт ВГЛТУ не ответил, показана копия от ${stamp}.`;
+  if (state.record.origin === "live") return `Обновлено с сайта ВГЛТУ ${stamp}.`;
+  return `Копия от ${stamp}.`;
 }
 
 function dateHero(iso) {
@@ -369,7 +451,12 @@ function dayBody(iso) {
     if (state.loading) {
       return `<div class="card skeleton"></div><div class="card skeleton"></div><div class="card skeleton"></div>`;
     }
-    return `<div class="empty"><p class="empty-title">Нет копии на ${esc(formatDots(iso))}</p><p>Нажмите «Обновить» или добавьте эту дату скриптом.</p></div>`;
+    const hint = offlineNow()
+      ? "Нет связи с сервером. Откройте эту дату, когда будет интернет, — потом она будет доступна офлайн."
+      : state.liveIssue === "upstream"
+        ? "Сайт ВГЛТУ не ответил. Нажмите «Обновить» чуть позже."
+        : "Нажмите «Обновить», чтобы загрузить расписание.";
+    return `<div class="empty"><p class="empty-title">Нет расписания на ${esc(formatDots(iso))}</p><p>${esc(hint)}</p></div>`;
   }
   if (!day.lessons.length) return `<div class="empty"><p class="empty-title">Нет пар</p><p>В этот день занятий нет.</p></div>`;
   const lessons = day.lessons.filter((lesson) => lessonMatchesSubgroup(lesson, state.subgroup));
@@ -799,8 +886,10 @@ async function commitGroup(raw) {
   const name = resolveGroup(raw);
   if (!name) return;
   saveGroup(name);
+  rememberRecent(name);
   state.group = name;
   state.query = name;
+  state.liveIssue = "";
   state.pickerOpen = false;
   state.follow = "today";
   state.mode = "today";
@@ -957,6 +1046,8 @@ window.addEventListener("beforeinstallprompt", (event) => {
 window.addEventListener("online", () => {
   render();
   if (state.group) refresh(activeIso(), true);
+  refreshGroups();
+  setTimeout(prefetchRecent, 5000);
 });
 
 window.addEventListener("offline", () => render());
@@ -983,7 +1074,7 @@ function watchServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   const hadController = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener("message", (event) => {
-    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v8" || !hadController) return;
+    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v9" || !hadController) return;
     state.updateReady = true;
     render();
   });
@@ -1125,6 +1216,7 @@ function boot() {
   state.attendance.snapshot = loadSnapshot();
   state.groups = groupsFromStorage();
   state.group = loadGroup();
+  if (state.group) rememberRecent(state.group);
   state.query = state.group || DEFAULT_GROUP;
   state.pickerOpen = !state.group;
   state.pickerCanClose = false;
@@ -1141,6 +1233,7 @@ function boot() {
   if (state.group) refresh(moscowIso(), true);
   planNotification(state.record);
   setInterval(tick, 30000);
+  setTimeout(prefetchRecent, 8000);
 }
 
 boot();

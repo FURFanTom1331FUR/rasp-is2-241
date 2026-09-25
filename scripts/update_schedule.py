@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Скачать расписание групп ВГЛТУ и сохранить JSON для офлайн-приложения.
 
-Сайт kis.vgltu.ru не отдаёт заголовок CORS, поэтому страница на GitHub Pages
-не может прочитать ответ из браузера. Этот скрипт запускает сопровождающий
-и кладёт файлы в data/, откуда приложение читает их с того же домена.
+Приложение берёт живое расписание через прокси /schedule (functions/), а эти
+файлы в data/ — запасная копия для групп ИС2-24x, которая есть в приложении
+сразу после установки. Скрипт каждую ночь запускает GitHub Actions
+(.github/workflows/update-schedule.yml); файл перезаписывается, только если
+пары изменились.
+
+kis.vgltu.ru без Accept-Encoding: gzip обрывает ответ после ~16 КБ, поэтому
+запросы идут с gzip и распаковываются здесь.
 
 Примеры:
   python3 scripts/update_schedule.py
@@ -14,7 +19,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import zlib
 import re
 import sys
 import time
@@ -32,6 +39,10 @@ LIST_URL = "https://kis.vgltu.ru/list?type=Group"
 SCHEDULE_URL = "https://kis.vgltu.ru/schedule"
 MSK = timezone(timedelta(hours=3))
 USER_AGENT = "rasp-is2-241/1.0 (+https://github.com/FURFanTom1331FUR/rasp-is2-241)"
+DEFAULT_GROUPS = ["ИС2-241-ОБ", "ИС2-242-ОБ", "ИС2-243-ОБ", "ИС2-244-ОБ"]
+REQUEST_TIMEOUT_S = 30
+REQUEST_DELAY_S = 1.0
+RETRIES = 3
 
 MONTHS = {
     "января": 1,
@@ -68,10 +79,35 @@ def moscow_today() -> date:
     return datetime.now(MSK).date()
 
 
+def decode_body(raw: bytes, encoding: str) -> bytes:
+    encoding = (encoding or "").strip().lower()
+    if encoding == "gzip":
+        return gzip.decompress(raw)
+    if encoding == "deflate":
+        try:
+            return zlib.decompress(raw)
+        except zlib.error:
+            return zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw
+
+
 def fetch(url: str) -> str:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    with urllib.request.urlopen(request, timeout=40) as response:
-        return response.read().decode("utf-8", "replace")
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "*/*", "Accept-Encoding": "gzip"},
+    )
+    last_error: Exception | None = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+                raw = decode_body(response.read(), response.headers.get("Content-Encoding", ""))
+                return raw.decode("utf-8", "replace")
+        except (urllib.error.URLError, TimeoutError, OSError, EOFError, zlib.error) as error:
+            last_error = error
+            if attempt < RETRIES:
+                print(f"  повтор {attempt}/{RETRIES - 1}: {error}", file=sys.stderr)
+                time.sleep(REQUEST_DELAY_S * 3 * attempt)
+    raise RuntimeError(f"{url}: {last_error}")
 
 
 def lines_of(cell_html: str) -> list[str]:
@@ -232,6 +268,10 @@ def update_groups() -> list[str]:
     if not isinstance(groups, list) or not groups:
         raise RuntimeError("Список групп пустой или неожиданного формата")
     names = [str(item).strip() for item in groups if str(item).strip()]
+    previous = load_json(DATA / "groups.json")
+    if previous and previous.get("groups") == names:
+        print(f"Групп в списке: {len(names)} (без изменений)")
+        return names
     write_json(
         DATA / "groups.json",
         {
@@ -263,10 +303,12 @@ def update_group(group: str, start: date, weeks: int) -> None:
             raise RuntimeError(f"Пустой ответ для {group} на {window.isoformat()}")
         for day in parsed:
             by_date[day["date"]] = day
-        if index + 1 < weeks:
-            time.sleep(0.25)
+        time.sleep(REQUEST_DELAY_S)
 
     days = [by_date[key] for key in sorted(by_date)]
+    if previous and previous.get("days") == days:
+        print(f"  {path.relative_to(ROOT)}: без изменений")
+        return
     write_json(
         path,
         {
@@ -284,9 +326,9 @@ def update_group(group: str, start: date, weeks: int) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Обновить JSON расписания ВГЛТУ для Пары")
-    parser.add_argument("groups", nargs="*", help="Коды групп. По умолчанию ИС2-241-ОБ")
+    parser.add_argument("groups", nargs="*", help="Коды групп. По умолчанию " + ", ".join(DEFAULT_GROUPS))
     parser.add_argument("--from", dest="start", help="Первый день окна, ГГГГ-ММ-ДД. По умолчанию понедельник текущей недели по Москве")
-    parser.add_argument("--weeks", type=int, default=2, help="Сколько окон по 14 дней запросить (по умолчанию 2)")
+    parser.add_argument("--weeks", type=int, default=3, help="Сколько окон по 14 дней запросить (по умолчанию 3 — шесть недель)")
     return parser.parse_args()
 
 
@@ -305,9 +347,10 @@ def main() -> int:
         today = moscow_today()
         start = today - timedelta(days=today.weekday())
 
-    groups = args.groups or ["ИС2-241-ОБ"]
+    groups = args.groups or DEFAULT_GROUPS
     try:
         known = update_groups()
+        time.sleep(REQUEST_DELAY_S)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as error:
         print(f"Не удалось обновить список групп: {error}", file=sys.stderr)
         return 1

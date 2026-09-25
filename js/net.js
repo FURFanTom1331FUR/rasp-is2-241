@@ -12,7 +12,7 @@ export async function fetchText(input, init = {}, ms = FETCH_TIMEOUT_MS) {
   try {
     const response = await fetch(input, { ...init, signal: controller.signal });
     const text = await response.text();
-    return { ok: response.ok, status: response.status, text };
+    return { ok: response.ok, status: response.status, text, headers: response.headers };
   } finally {
     clearTimeout(timer);
     if (parent) parent.removeEventListener("abort", onAbort);
