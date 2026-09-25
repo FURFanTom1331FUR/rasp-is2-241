@@ -25,6 +25,17 @@ export function dismissInstallTip() {
   localStorage.setItem("rasp.installTip", "0");
 }
 
+export function loadSubgroup() {
+  const value = localStorage.getItem("rasp.subgroup");
+  return value === "1" || value === "2" ? value : "all";
+}
+
+export function saveSubgroup(value) {
+  const next = value === "1" || value === "2" ? value : "all";
+  localStorage.setItem("rasp.subgroup", next);
+  return next;
+}
+
 function recordKey(group) {
   return `rasp.schedule:${group}`;
 }

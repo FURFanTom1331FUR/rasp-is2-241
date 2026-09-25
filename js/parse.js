@@ -14,9 +14,12 @@ const MONTHS = {
 };
 
 const TYPE_RE = /^(лек|лаб|пр)\.\s*(.+)$/i;
-const SUBGROUP_RE = /^(\d+)\s*п\.г\.?$/i;
 const DATE_RE = /(\d{1,2})\s+([а-яё]+)\s+(\d{4})/i;
 const TIME_RE = /(\d{2}:\d{2})-(\d{2}:\d{2})/;
+const SUBGROUP_BODY = String.raw`(\d)\s*п\s*[./]?\s*г\.?|(\d)\s*[-–]?\s*(?:я|ая|й)?\s*подгруппа|подгруппа\s+(\d)`;
+const SUBGROUP_MARK = new RegExp(`(?:^|[\\s(«"'])(?:${SUBGROUP_BODY})(?=$|[\\s).,;:»"'])`, "i");
+const SUBGROUP_LINE = new RegExp(`^(?:\\(\\s*)?(?:${SUBGROUP_BODY})\\s*\\)?\\.?$`, "i");
+const SUBGROUP_STRIP = new RegExp(String.raw`(?:^|\s)\(?\s*(?:\d\s*п\s*[./]?\s*г\.?|\d\s*[-–]?\s*(?:я|ая|й)?\s*подгруппа|подгруппа\s+\d)\s*\)?(?=$|[\s.,;:])`, "gi");
 
 function decodeHtml(value) {
   return value
@@ -49,25 +52,124 @@ function parseRuDate(label) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+function subgroupFromMatch(match) {
+  if (!match) return null;
+  const number = Number(match[1] || match[2] || match[3]);
+  return number >= 1 && number <= 9 ? number : null;
+}
+
+export function subgroupNumberIn(value) {
+  const text = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return subgroupFromMatch(SUBGROUP_LINE.exec(text)) || subgroupFromMatch(SUBGROUP_MARK.exec(text));
+}
+
+export function stripSubgroupMark(value) {
+  return String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(SUBGROUP_STRIP, " ")
+    .replace(/\s+([.,;:])/g, "$1")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function plainSubject(value) {
+  return stripSubgroupMark(value)
+    .replace(/^(лек|лаб|пр)\.?\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("ru");
+}
+
+export function normalizeSubgroupChoice(value) {
+  return value === "1" || value === "2" ? value : "all";
+}
+
+export function lessonSubgroup(lesson) {
+  if (!lesson || typeof lesson !== "object") return subgroupNumberIn(lesson);
+  const fromField = subgroupNumberIn(lesson.subgroup);
+  if (fromField) return fromField;
+  const fields = [lesson.subject, lesson.room, lesson.teacher, ...(Array.isArray(lesson.groups) ? lesson.groups : [])];
+  for (const field of fields) {
+    const number = subgroupNumberIn(field);
+    if (number) return number;
+  }
+  return null;
+}
+
+export function subgroupBadgeLabel(number) {
+  return number ? `${number} пг` : "";
+}
+
+export function lessonMatchesSubgroup(lesson, choice) {
+  const selected = normalizeSubgroupChoice(choice);
+  if (selected === "all") return true;
+  const number = lessonSubgroup(lesson);
+  if (!number) return true;
+  return String(number) === selected;
+}
+
+export function subjectSubgroup(subject, sameDayLessons = []) {
+  const direct = subgroupNumberIn(`${subject?.name || ""} ${subject?.type || ""}`);
+  if (direct) return direct;
+  const name = plainSubject(subject?.name);
+  if (!name) return null;
+  const matches = sameDayLessons.filter((lesson) => plainSubject(lesson.subject) === name);
+  const ids = [...new Set(matches.map((lesson) => lessonSubgroup(lesson) || 0))];
+  if (ids.length !== 1) return null;
+  return ids[0] || null;
+}
+
+export function subjectMatchesSubgroup(subject, choice, sameDayLessons = []) {
+  const selected = normalizeSubgroupChoice(choice);
+  if (selected === "all") return true;
+  const number = subjectSubgroup(subject, sameDayLessons);
+  if (!number) return true;
+  return String(number) === selected;
+}
+
+function cleanLine(line, subgroup) {
+  const number = subgroupNumberIn(line);
+  if (!number) return { line, subgroup };
+  const stripped = stripSubgroupMark(line);
+  return { line: stripped, subgroup: subgroup || number };
+}
+
 function parseCell(cellHtml, slot) {
   const lines = linesOf(cellHtml);
   if (!lines.length || !slot) return null;
   if (lines.length === 1 && lines[0].toLowerCase().startsWith("нет пар")) return null;
 
-  let subject = lines[0];
+  let subgroup = null;
+  const kept = [];
+  for (const line of lines) {
+    const dedicated = subgroupFromMatch(SUBGROUP_LINE.exec(line.replace(/\s+/g, " ").trim()));
+    if (dedicated) {
+      if (!subgroup) subgroup = dedicated;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (!kept.length) return null;
+
+  let subject = kept[0];
   let lessonType = null;
   const typeMatch = TYPE_RE.exec(subject);
   if (typeMatch) {
     lessonType = typeMatch[1].toLowerCase();
     subject = typeMatch[2].trim();
   }
+  const subjectLine = cleanLine(subject, subgroup);
+  subject = subjectLine.line;
+  subgroup = subjectLine.subgroup;
+  if (!subject) return null;
 
-  let rest = lines.slice(1);
-  let subgroup = null;
-  const subgroupMatch = rest.length ? SUBGROUP_RE.exec(rest[0]) : null;
-  if (subgroupMatch) {
-    subgroup = `${subgroupMatch[1]} п.г.`;
-    rest = rest.slice(1);
+  const rest = [];
+  for (const line of kept.slice(1)) {
+    const cleaned = cleanLine(line, subgroup);
+    subgroup = cleaned.subgroup;
+    if (cleaned.line) rest.push(cleaned.line);
   }
 
   const teacher = rest.length ? rest[rest.length - 1] : "";
@@ -80,7 +182,7 @@ function parseCell(cellHtml, slot) {
     end,
     type: lessonType,
     subject,
-    subgroup,
+    subgroup: subgroup ? `${subgroup} п.г.` : null,
     room,
     teacher,
     groups,

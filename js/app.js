@@ -24,18 +24,27 @@ import {
   visibleWeekDays,
   weekdayName,
 } from "./dates.js";
-import { parseScheduleHtml } from "./parse.js";
+import {
+  lessonMatchesSubgroup,
+  lessonSubgroup,
+  parseScheduleHtml,
+  subjectMatchesSubgroup,
+  subjectSubgroup,
+  subgroupBadgeLabel,
+} from "./parse.js";
 import {
   dismissInstallTip,
   loadGroup,
   loadInstallDismissed,
   loadNotify,
   loadRecord,
+  loadSubgroup,
   mergeRecords,
   readCachedRecord,
   saveGroup,
   saveNotify,
   saveRecord,
+  saveSubgroup,
 } from "./store.js";
 
 const LIVE_SCHEDULE = "https://kis.vgltu.ru/schedule";
@@ -56,6 +65,7 @@ const state = {
   pickerOpen: false,
   pickerCanClose: false,
   dateError: "",
+  subgroup: "all",
   loading: false,
   liveBlocked: false,
   swReady: false,
@@ -144,6 +154,7 @@ function findNextLesson(record, now = new Date()) {
     const day = record.days.find((item) => item.date === iso);
     if (!day) continue;
     for (const lesson of day.lessons) {
+      if (!lessonMatchesSubgroup(lesson, state.subgroup)) continue;
       const start = moscowInstant(iso, lesson.start);
       if (start.getTime() > now.getTime()) candidates.push({ iso, lesson, start });
     }
@@ -162,9 +173,11 @@ function planNotification(record) {
   const show = () => {
     sessionStorage.setItem("rasp.notified", key);
     const room = next.lesson.room ? ` · ${next.lesson.room}` : "";
+    const badge = subgroupBadgeLabel(lessonSubgroup(next.lesson));
+    const subgroup = badge ? ` · ${badge}` : "";
     try {
       new Notification("Скоро пара", {
-        body: `${formatDots(next.iso)} ${next.lesson.time} · ${next.lesson.subject}${room}`,
+        body: `${formatDots(next.iso)} ${next.lesson.time} · ${next.lesson.subject}${subgroup}${room}`,
         lang: "ru",
         tag: "rasp-next",
         icon: "./icons/icon-192.png",
@@ -315,9 +328,10 @@ function dateHero(iso) {
 function lessonCard(iso, lesson) {
   const phase = phaseOf(iso, lesson);
   const typeClass = lesson.type || "none";
+  const badge = state.subgroup === "all" ? subgroupBadgeLabel(lessonSubgroup(lesson)) : "";
   const chips = [
     lesson.type ? `<span class="chip ${esc(lesson.type)}">${esc(lesson.type)}</span>` : "",
-    lesson.subgroup ? `<span class="chip">${esc(lesson.subgroup)}</span>` : "",
+    badge ? `<span class="chip subgroup">${esc(badge)}</span>` : "",
     phase === "now" ? `<span class="chip now">сейчас</span>` : "",
   ].join("");
   const bits = [];
@@ -345,7 +359,12 @@ function dayBody(iso) {
     return `<div class="empty"><p class="empty-title">Нет копии на ${esc(formatDots(iso))}</p><p>Нажмите «Обновить» или добавьте эту дату скриптом.</p></div>`;
   }
   if (!day.lessons.length) return `<div class="empty"><p class="empty-title">Нет пар</p><p>В этот день занятий нет.</p></div>`;
-  return day.lessons.map((lesson) => lessonCard(iso, lesson)).join("");
+  const lessons = day.lessons.filter((lesson) => lessonMatchesSubgroup(lesson, state.subgroup));
+  if (!lessons.length) {
+    const label = state.subgroup === "1" || state.subgroup === "2" ? `${state.subgroup} пг` : "этой подгруппы";
+    return `<div class="empty"><p class="empty-title">Нет пар для ${esc(label)}</p><p>В этот день есть только занятия другой подгруппы.</p></div>`;
+  }
+  return lessons.map((lesson) => lessonCard(iso, lesson)).join("");
 }
 
 function dateControls(iso) {
@@ -392,7 +411,7 @@ function scheduleView() {
   } else {
     body = `<div class="lessons">${dayBody(iso)}</div>`;
   }
-  return `${scheduleSwitch()}${dateHero(iso)}
+  return `${scheduleSwitch()}${subgroupSwitch()}${dateHero(iso)}
   ${body}
   <section class="panel">
     ${dateControls(iso)}
@@ -422,19 +441,49 @@ function attendanceRange() {
   return { scope: "semester", ...semesterRange(today) };
 }
 
+function attendanceDateIso(value) {
+  const text = String(value || "").trim();
+  if (isValidIso(text)) return text;
+  const match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(text);
+  if (!match) return "";
+  const iso = `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
+  return isValidIso(iso) ? iso : "";
+}
+
+function lessonsOn(dateLabel) {
+  const iso = attendanceDateIso(dateLabel);
+  if (!iso) return [];
+  return dayByDate(iso)?.lessons || [];
+}
+
+function visibleAttendanceDays(days) {
+  return (days || [])
+    .map((day) => ({
+      ...day,
+      subjects: (day.subjects || []).filter((subject) => subjectMatchesSubgroup(subject, state.subgroup, lessonsOn(day.date))),
+    }))
+    .filter((day) => state.subgroup === "all" || day.subjects.length);
+}
+
 function attendanceDaysHtml(snapshot) {
-  if (!snapshot?.days?.length) {
-    return `<div class="empty"><p class="empty-title">Нет отметок</p><p>За этот период кабинет ничего не вернул.</p></div>`;
+  const source = snapshot?.days || [];
+  const days = visibleAttendanceDays(source);
+  if (!days.length) {
+    const filtered = state.subgroup !== "all" && source.some((day) => (day.subjects || []).length);
+    const title = filtered ? `Нет занятий для ${state.subgroup} пг` : "Нет отметок";
+    const text = filtered ? "В журнале за этот период остались только занятия другой подгруппы." : "За этот период кабинет ничего не вернул.";
+    return `<div class="empty"><p class="empty-title">${esc(title)}</p><p>${esc(text)}</p></div>`;
   }
-  return snapshot.days
+  return days
     .map((day) => {
       const rows = (day.subjects || [])
         .map((subject) => {
           const mark = subject.mark === "absent" ? "Нет" : subject.mark === "present" ? "Был" : "—";
           const markClass = subject.mark === "absent" ? "abs" : subject.mark === "present" ? "ok" : "";
+          const badge = state.subgroup === "all" ? subgroupBadgeLabel(subjectSubgroup(subject, lessonsOn(day.date))) : "";
           return `<article class="att-card ${subject.mark === "absent" ? "abs" : ""}">
             <div class="att-top"><h3>${esc(subject.name || "Занятие")}</h3><span class="mark ${markClass}">${mark}</span></div>
-            ${subject.type ? `<p class="meta-line">${esc(subject.type)}</p>` : ""}
+            ${subject.type || badge ? `<p class="meta-line">${subject.type ? `<span>${esc(subject.type)}</span>` : ""}${subject.type && badge ? `<span class="dot">·</span>` : ""}${badge ? `<span class="chip subgroup">${esc(badge)}</span>` : ""}</p>` : ""}
           </article>`;
         })
         .join("");
@@ -457,17 +506,20 @@ function studentHeading(name) {
 }
 
 function summaryCard(snapshot) {
-  const stats = snapshot.summary || summarizeAttendance(snapshot.days);
+  const days = visibleAttendanceDays(snapshot.days);
+  const stats = summarizeAttendance(days);
   const range = `${formatDotsSafe(snapshot.from)} – ${formatDotsSafe(snapshot.to)}`;
   const who = studentHeading(snapshot.name || state.attendance.session?.name);
+  const subgroupNote = state.subgroup === "all" ? "" : ` Учитываются общие занятия и ${state.subgroup} пг.`;
   const formula = stats.unmarked
-    ? `По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие. ${stats.unmarked} без отметки входят в «всего» и не считаются пропуском.`
-    : "По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие.";
+    ? `По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие. ${stats.unmarked} без отметки входят в «всего» и не считаются пропуском.${subgroupNote}`
+    : `По занятиям: (всего − пропуски) / всего. Строка журнала — одно занятие, часы кабинет не присылает. «Н» — отсутствие.${subgroupNote}`;
   if (!stats.total) {
+    const filteredOut = state.subgroup !== "all" && (snapshot.days || []).some((day) => (day.subjects || []).length);
     return `<article class="summary">
       ${who}
       <p class="summary-kicker">${esc(snapshot.label || "Журнал")} · ${esc(range)}</p>
-      <p class="summary-empty">В журнале нет занятий</p>
+      <p class="summary-empty">${filteredOut ? `Нет занятий для ${esc(state.subgroup)} пг` : "В журнале нет занятий"}</p>
       <p class="formula">${esc(formula)}</p>
     </article>`;
   }
@@ -558,13 +610,27 @@ function scheduleSwitch() {
     .join("")}</div>`;
 }
 
+function subgroupSwitch() {
+  const items = [
+    ["all", "Все"],
+    ["1", "1 пг"],
+    ["2", "2 пг"],
+  ];
+  return `<div class="subgroup-wrap">
+    <p class="subgroup-kicker">Подгруппа</p>
+    <div class="seg subgroup-seg" role="group" aria-label="Подгруппа">${items
+      .map(([value, label]) => `<button type="button" data-action="subgroup" data-subgroup="${value}" aria-pressed="${state.subgroup === value ? "true" : "false"}">${label}</button>`)
+      .join("")}</div>
+  </div>`;
+}
+
 function moreView() {
   const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
     <article class="block">
       <h2>Напоминание</h2>
-      <p>За 10 минут до следующей пары, пока приложение открыто. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
+      <p>За 10 минут до следующей пары, пока приложение открыто. Если выбрана подгруппа, напоминание приходит только по общим парам и парам этой подгруппы. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
       <p>${esc(state.notifyNote || (notifyOn ? "Напоминания включены." : "Сейчас выключены."))}</p>
       <button class="primary" type="button" data-action="notify-on">Включить за 10 минут</button>
       <button class="ghost" type="button" data-action="notify-off">Выключить</button>
@@ -758,7 +824,13 @@ app.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
-  if (action === "mode") {
+  if (action === "subgroup") {
+    const next = saveSubgroup(button.dataset.subgroup);
+    if (next === state.subgroup) return;
+    state.subgroup = next;
+    render();
+    planNotification(state.record);
+  } else if (action === "mode") {
     const mode = button.dataset.mode;
     state.dateError = "";
     if (mode === "today" || mode === "schedule") goToday();
@@ -999,6 +1071,7 @@ async function signOutAttendance() {
 
 async function boot() {
   state.seenToday = moscowIso();
+  state.subgroup = loadSubgroup();
   const semester = semesterRange(state.seenToday);
   state.attendance.from = semester.from;
   state.attendance.to = state.seenToday;
