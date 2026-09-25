@@ -480,6 +480,35 @@ label.field select {
 
 .tip p { margin: 0 0 8px; line-height: 1.4; }
 
+.update-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(76px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(408px, calc(100% - 24px));
+  padding: 8px 8px 8px 14px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.update-toast p {
+  flex: 1;
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.update-toast .text-btn {
+  width: auto;
+  margin: 0;
+  min-height: 36px;
+}
+
 .nav {
   position: fixed;
   left: 50%;
