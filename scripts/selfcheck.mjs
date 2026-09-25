@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import http from "node:http";
+import { fetchText } from "../js/net.js";
 import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, AttendanceError, configuredWorkerUrl, markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { onRequest as onLogin } from "../functions/login.js";
 import { onRequest as onAttendance } from "../functions/attendance.js";
@@ -78,6 +80,8 @@ assert.equal(configuredWorkerUrl(), "https://rasp-is2-241.pages.dev");
 delete globalThis.location;
 const network = asAttendanceError(new TypeError("Failed to fetch"));
 assert.equal(network.message, ATTENDANCE_NETWORK_MESSAGE);
+assert.equal(asAttendanceError(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })).code, "network");
+assert.equal(asAttendanceError(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })).message, ATTENDANCE_NETWORK_MESSAGE);
 assert.equal(network.message.includes("Failed to fetch"), false);
 assert.equal(asAttendanceError(Object.assign(new Error("Load failed"), { name: "TypeError" })).message, ATTENDANCE_NETWORK_MESSAGE);
 assert.equal(asAttendanceError(Object.assign(new Error("NetworkError when attempting to fetch resource."), { name: "NetworkError" })).message, ATTENDANCE_NETWORK_MESSAGE);
@@ -232,5 +236,48 @@ assert.equal(subjectSubgroup({ name: "Лабораторная", type: "" }, [
   { subject: "Лабораторная", subgroup: "1 п.г." },
   { subject: "Лабораторная", subgroup: "2 п.г." },
 ]), null);
+
+const hung = await new Promise((resolve, reject) => {
+  const server = http.createServer(() => {});
+  server.listen(0, "127.0.0.1", async () => {
+    const { port } = server.address();
+    const started = Date.now();
+    try {
+      await fetchText(`http://127.0.0.1:${port}/hang`, {}, 300);
+      reject(new Error("hung fetch should abort"));
+    } catch (error) {
+      const elapsed = Date.now() - started;
+      try {
+        assert.equal(error.name, "AbortError");
+        assert.ok(elapsed < 1500, `timeout took ${elapsed}ms`);
+      } catch (check) {
+        server.close(() => reject(check));
+        return;
+      }
+    }
+    server.close(() => resolve());
+  });
+});
+assert.equal(hung, undefined);
+
+const quick = await new Promise((resolve, reject) => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  server.listen(0, "127.0.0.1", async () => {
+    const { port } = server.address();
+    try {
+      const response = await fetchText(`http://127.0.0.1:${port}/ok`, {}, 1000);
+      assert.equal(response.ok, true);
+      assert.equal(response.text, '{"ok":true}');
+    } catch (error) {
+      server.close(() => reject(error));
+      return;
+    }
+    server.close(() => resolve());
+  });
+});
+assert.equal(quick, undefined);
 
 console.log("selfcheck ok");

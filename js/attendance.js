@@ -1,4 +1,5 @@
 import { WORKER_URL } from "./config.js";
+import { fetchText } from "./net.js";
 
 const SESSION_KEY = "rasp.attendance.session";
 const SNAPSHOT_KEY = "rasp.attendance.snapshot";
@@ -19,7 +20,13 @@ export function asAttendanceError(error) {
   if (error instanceof AttendanceError) return error;
   const name = String(error?.name || "");
   const message = String(error?.message || "");
-  if (name === "TypeError" || name === "NetworkError" || /Failed to fetch|NetworkError|Load failed/i.test(message)) {
+  if (
+    name === "TypeError" ||
+    name === "NetworkError" ||
+    name === "AbortError" ||
+    name === "TimeoutError" ||
+    /Failed to fetch|NetworkError|Load failed|aborted|timed out|timeout/i.test(message)
+  ) {
     return new AttendanceError(ATTENDANCE_NETWORK_MESSAGE, "network");
   }
   if (error instanceof Error) return error;
@@ -161,23 +168,22 @@ export function normalizeAttendance(payload) {
   }));
 }
 
-async function readBody(response) {
-  const text = await response.text();
+function parseJson(text) {
   try {
-    return { text, json: JSON.parse(text) };
+    return JSON.parse(text);
   } catch {
-    return { text, json: null };
+    return null;
   }
 }
 
 export async function loginAttendance(workerUrl, login, password) {
   try {
-    const response = await fetch(`${workerUrl}/login`, {
+    const response = await fetchText(`${workerUrl}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ login, password }),
     });
-    const { json } = await readBody(response);
+    const json = parseJson(response.text);
     if (!response.ok || !json?.ok || !json.token) {
       throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
     }
@@ -193,10 +199,10 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
     url.searchParams.set("from", from);
     url.searchParams.set("to", to);
     if (options.needName === false) url.searchParams.set("needName", "0");
-    const response = await fetch(url, {
+    const response = await fetchText(url, {
       headers: { Accept: "application/json", "X-Vgltu-Session": token },
     });
-    const { json } = await readBody(response);
+    const json = parseJson(response.text);
     if (response.status === 401) {
       throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
     }
@@ -215,7 +221,7 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
 
 export async function logoutAttendance(workerUrl, token) {
   try {
-    await fetch(`${workerUrl}/logout`, {
+    await fetchText(`${workerUrl}/logout`, {
       method: "POST",
       headers: { Accept: "application/json", "X-Vgltu-Session": token },
     });

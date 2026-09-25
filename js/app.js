@@ -24,6 +24,7 @@ import {
   visibleWeekDays,
   weekdayName,
 } from "./dates.js";
+import { fetchText } from "./net.js";
 import {
   lessonMatchesSubgroup,
   lessonSubgroup,
@@ -73,6 +74,7 @@ const state = {
   notifyNote: "",
   seenToday: "",
   lastRefresh: 0,
+  updateReady: false,
   attendance: {
     error: "",
     loading: false,
@@ -191,32 +193,7 @@ function planNotification(record) {
   else if (delay > 0 && delay < 24 * 60 * 60 * 1000) notifyTimer = setTimeout(show, delay);
 }
 
-async function loadGroups() {
-  try {
-    const response = await fetch(LIVE_GROUPS);
-    if (response.ok) {
-      const data = await response.json();
-      if (Array.isArray(data) && data.length) {
-        localStorage.setItem("rasp.groups", JSON.stringify(data));
-        return data.map(String);
-      }
-    }
-  } catch {
-    /* Список групп тоже без CORS. */
-  }
-  try {
-    const response = await fetch("./data/groups.json", { cache: "no-cache" });
-    if (response.ok) {
-      const data = await response.json();
-      const groups = data.groups || data;
-      if (Array.isArray(groups) && groups.length) {
-        localStorage.setItem("rasp.groups", JSON.stringify(groups));
-        return groups.map(String);
-      }
-    }
-  } catch {
-    /* Офлайн без кэша списка. */
-  }
+function groupsFromStorage() {
   try {
     const cached = JSON.parse(localStorage.getItem("rasp.groups") || "null");
     if (Array.isArray(cached) && cached.length) return cached.map(String);
@@ -226,11 +203,44 @@ async function loadGroups() {
   return [DEFAULT_GROUP, "ИС2-242-ОБ", "ИС2-243-ОБ", "ИС2-244-ОБ"];
 }
 
+function rememberGroups(groups) {
+  state.groups = groups;
+  try {
+    localStorage.setItem("rasp.groups", JSON.stringify(groups));
+  } catch {
+    /* Память телефона может быть заполнена. */
+  }
+  const list = document.getElementById("suggest");
+  if (list && state.pickerOpen) list.innerHTML = suggestHtml(state.query);
+}
+
+async function refreshGroups() {
+  try {
+    const response = await fetchText("./data/groups.json");
+    if (response.ok) {
+      const data = JSON.parse(response.text);
+      const groups = data.groups || data;
+      if (Array.isArray(groups) && groups.length) rememberGroups(groups.map(String));
+    }
+  } catch {
+    /* Список в памяти телефона остаётся. */
+  }
+  try {
+    const response = await fetchText(LIVE_GROUPS);
+    if (response.ok) {
+      const data = JSON.parse(response.text);
+      if (Array.isArray(data) && data.length) rememberGroups(data.map(String));
+    }
+  } catch {
+    /* Сайт ВГЛТУ без CORS или соединение зависло. */
+  }
+}
+
 async function fetchLive(group, iso) {
   const url = `${LIVE_SCHEDULE}?date=${iso}&group=${encodeURIComponent(group)}`;
-  const response = await fetch(url);
+  const response = await fetchText(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const days = parseScheduleHtml(await response.text());
+  const days = parseScheduleHtml(response.text);
   if (!days.length) throw new Error("empty");
   return {
     group,
@@ -242,44 +252,47 @@ async function fetchLive(group, iso) {
 }
 
 async function fetchSnapshot(group) {
-  const response = await fetch(`./data/schedules/${encodeURIComponent(group)}.json`, { cache: "no-cache" });
-  if (!response.ok) return null;
-  const data = await response.json();
-  data.group = data.group || group;
-  data.origin = data.origin || "snapshot";
-  return data;
+  try {
+    const response = await fetchText(`./data/schedules/${encodeURIComponent(group)}.json`);
+    if (!response.ok) return null;
+    const data = JSON.parse(response.text);
+    data.group = data.group || group;
+    data.origin = data.origin || "snapshot";
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 async function refresh(iso, force) {
-  if (!state.group || !navigator.onLine) return;
-  if (!force && Date.now() - state.lastRefresh < 10 * 60 * 1000 && dayByDate(iso)) return;
+  if (!state.group) return;
+  const online = navigator.onLine;
+  if (!online && state.record?.days?.length) return;
+  if (online && !force && Date.now() - state.lastRefresh < 10 * 60 * 1000 && dayByDate(iso)) return;
   const token = ++refreshToken;
+  const group = state.group;
+  if (online) state.lastRefresh = Date.now();
   state.loading = true;
-  state.lastRefresh = Date.now();
   render();
-  let record = state.record;
-  let liveBlocked = false;
-  try {
-    record = mergeRecords(record, await fetchLive(state.group, iso));
-    record = await saveRecord(state.group, record);
-  } catch {
-    liveBlocked = true;
-    try {
-      const file = await fetchSnapshot(state.group);
-      if (file) {
-        record = mergeRecords(record, file);
-        record = await saveRecord(state.group, record);
-      }
-    } catch {
-      /* Остаётся то, что уже лежит в памяти телефона. */
-    }
-  }
+  const snapPromise = fetchSnapshot(group);
+  const livePromise = online ? fetchLive(group, iso).catch(() => null) : Promise.resolve(null);
+  const snap = await snapPromise;
   if (token !== refreshToken) return;
-  state.record = record;
-  state.liveBlocked = liveBlocked;
+  if (snap) {
+    state.record = await saveRecord(group, mergeRecords(state.record, snap));
+    render();
+  }
+  const live = await livePromise;
+  if (token !== refreshToken) return;
+  if (live) {
+    state.record = await saveRecord(group, mergeRecords(state.record, live));
+    state.liveBlocked = false;
+  } else if (!state.record?.fetchedAt) {
+    state.liveBlocked = true;
+  }
   state.loading = false;
   render();
-  planNotification(record);
+  planNotification(state.record);
 }
 
 function statusText() {
@@ -710,6 +723,14 @@ function nav() {
     .join("")}</nav>`;
 }
 
+function updateToast() {
+  if (!state.updateReady) return "";
+  return `<div class="update-toast" role="status">
+    <p>Доступно обновление</p>
+    <button type="button" class="text-btn" data-action="apply-update">Перезагрузить</button>
+  </div>`;
+}
+
 function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
@@ -733,6 +754,7 @@ function render() {
     </header>
     <main>${main}</main>
     ${nav()}
+    ${updateToast()}
     ${state.pickerOpen ? pickerHtml() : ""}`;
 }
 
@@ -896,7 +918,8 @@ app.addEventListener("click", (event) => {
       state.installEvent = null;
       render();
     });
-  } else if (action === "notify-on") enableNotify();
+  } else if (action === "apply-update") location.reload();
+  else if (action === "notify-on") enableNotify();
   else if (action === "notify-off") {
     saveNotify(false);
     clearTimeout(notifyTimer);
@@ -944,14 +967,37 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pageshow", () => tick());
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js").then(() => {
-      state.swReady = true;
-      if (state.mode === "more") render();
-    }).catch(() => {});
-  });
+function offerUpdate(worker, hadController) {
+  if (!worker || !hadController) return;
+  const notify = () => {
+    if (worker.state !== "installed" && worker.state !== "activated") return;
+    if (!navigator.serviceWorker.controller) return;
+    state.updateReady = true;
+    render();
+  };
+  if (worker.state === "installed" || worker.state === "activated") notify();
+  worker.addEventListener("statechange", notify);
 }
+
+function watchServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v8" || !hadController) return;
+    state.updateReady = true;
+    render();
+  });
+  navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+    state.swReady = true;
+    offerUpdate(registration.installing, hadController);
+    offerUpdate(registration.waiting, hadController);
+    registration.addEventListener("updatefound", () => offerUpdate(registration.installing, hadController));
+    if (state.mode === "more") render();
+    registration.update().catch(() => {});
+  }).catch(() => {});
+}
+
+watchServiceWorker();
 
 let attendanceToken = 0;
 
@@ -1069,7 +1115,7 @@ async function signOutAttendance() {
   render();
 }
 
-async function boot() {
+function boot() {
   state.seenToday = moscowIso();
   state.subgroup = loadSubgroup();
   const semester = semesterRange(state.seenToday);
@@ -1077,13 +1123,21 @@ async function boot() {
   state.attendance.to = state.seenToday;
   state.attendance.session = loadSession();
   state.attendance.snapshot = loadSnapshot();
-  state.groups = await loadGroups();
+  state.groups = groupsFromStorage();
   state.group = loadGroup();
   state.query = state.group || DEFAULT_GROUP;
   state.pickerOpen = !state.group;
   state.pickerCanClose = false;
-  if (state.group) state.record = loadRecord(state.group) || (await readCachedRecord(state.group));
+  if (state.group) state.record = loadRecord(state.group);
   render();
+  if (state.group && !state.record) {
+    readCachedRecord(state.group).then((cached) => {
+      if (!cached || state.record || state.group !== loadGroup()) return;
+      state.record = cached;
+      render();
+    });
+  }
+  refreshGroups();
   if (state.group) refresh(moscowIso(), true);
   planNotification(state.record);
   setInterval(tick, 30000);
