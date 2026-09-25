@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import { readFileSync } from "node:fs";
 import { fetchText } from "../js/net.js";
+import { apiBase, isProxyHost, PAGES_ORIGIN } from "../js/config.js";
 import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, AttendanceError, configuredWorkerUrl, markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { onRequest as onLogin } from "../functions/login.js";
 import { onRequest as onAttendance } from "../functions/attendance.js";
 import { onRequest as onLogout } from "../functions/logout.js";
 import { onRequest as onSchedule } from "../functions/schedule.js";
 import { onRequest as onGroups } from "../functions/groups.js";
-import { cachedJson, fetchUpstream, isGroupCode, isIsoDate, loadGroups, loadSchedule, shiftIso, UpstreamError, windowCount } from "../functions/_kis.js";
+import { allowedOrigin, cachedJson, fetchUpstream, isGroupCode, isIsoDate, loadGroups, loadSchedule, shiftIso, UpstreamError, windowCount } from "../functions/_kis.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
 import { lessonMatchesSubgroup, lessonSubgroup, parseScheduleHtml, subgroupNumberIn, subjectMatchesSubgroup, subjectSubgroup } from "../js/parse.js";
@@ -78,7 +80,14 @@ assert.equal(summarizeAttendance([]).percent, null);
 assert.equal(normalizeWorkerUrl("https://rasp-attendance.example.workers.dev"), "https://rasp-attendance.example.workers.dev");
 assert.equal(normalizeWorkerUrl("https://evil.example/login"), null);
 assert.equal(configuredWorkerUrl(), "");
-globalThis.location = { origin: "https://rasp-is2-241.pages.dev/" };
+globalThis.location = { origin: "https://rasp-is2-241.pages.dev/", hostname: "rasp-is2-241.pages.dev" };
+assert.equal(configuredWorkerUrl(), "https://rasp-is2-241.pages.dev");
+globalThis.location = { origin: "https://abc123.rasp-is2-241.pages.dev", hostname: "abc123.rasp-is2-241.pages.dev" };
+assert.equal(configuredWorkerUrl(), "https://abc123.rasp-is2-241.pages.dev");
+globalThis.location = { origin: "http://localhost:8788", hostname: "localhost" };
+assert.equal(configuredWorkerUrl(), "http://localhost:8788");
+// Зеркало GitHub Pages без functions/ — вход через Cloudflare Pages.
+globalThis.location = { origin: "https://furfantom1331fur.github.io", hostname: "furfantom1331fur.github.io" };
 assert.equal(configuredWorkerUrl(), "https://rasp-is2-241.pages.dev");
 delete globalThis.location;
 const network = asAttendanceError(new TypeError("Failed to fetch"));
@@ -329,6 +338,91 @@ assert.equal((await onGroups({ request: new Request("https://x.test/groups", { m
   const good = await cachedJson({}, "https://x.test/__edge/k", 60, async () => ({ ok: true, fetchedAt: new Date().toISOString(), days: [] }));
   assert.equal(good.status, 200);
   assert.match(good.headers.get("Content-Type"), /json/);
+}
+
+// Основа адресов прокси: свой домен на pages.dev/localhost, иначе pages.dev по CORS.
+assert.equal(PAGES_ORIGIN, "https://rasp-is2-241.pages.dev");
+assert.equal(apiBase("rasp-is2-241.pages.dev"), "./");
+assert.equal(apiBase("feature-x.rasp-is2-241.pages.dev"), "./");
+assert.equal(apiBase("localhost"), "./");
+assert.equal(apiBase("127.0.0.1"), "./");
+assert.equal(apiBase("furfantom1331fur.github.io"), "https://rasp-is2-241.pages.dev/");
+assert.equal(apiBase("evil-rasp-is2-241.pages.dev"), "https://rasp-is2-241.pages.dev/");
+assert.equal(isProxyHost("rasp-is2-241.pages.dev.evil.com"), false);
+
+// CORS прокси: белый список, Vary: Origin, заголовок на каждый ответ (в том числе из копии на краю).
+{
+  const MIRROR = "https://furfantom1331fur.github.io";
+  assert.equal(allowedOrigin(MIRROR), MIRROR);
+  assert.equal(allowedOrigin("https://rasp-is2-241.pages.dev"), "https://rasp-is2-241.pages.dev");
+  assert.equal(allowedOrigin("https://0a1b2c.rasp-is2-241.pages.dev"), "https://0a1b2c.rasp-is2-241.pages.dev");
+  assert.equal(allowedOrigin("https://evil.example"), "");
+  assert.equal(allowedOrigin("https://rasp-is2-241.pages.dev.evil.example"), "");
+  assert.equal(allowedOrigin("http://furfantom1331fur.github.io"), "");
+  assert.equal(allowedOrigin("null"), "");
+  const at = (path, init = {}) => new Request(`https://rasp-is2-241.pages.dev${path}`, init);
+  for (const handler of [onSchedule, onGroups]) {
+    const path = handler === onSchedule ? "/schedule?date=2026-09-21&group=ИС2-241-ОБ" : "/groups";
+    const ok = await handler({ request: at(path, { method: "OPTIONS", headers: { Origin: MIRROR, "Access-Control-Request-Method": "GET" } }) });
+    assert.equal(ok.status, 204);
+    assert.equal(ok.headers.get("Access-Control-Allow-Origin"), MIRROR);
+    assert.equal(ok.headers.get("Access-Control-Allow-Methods"), "GET");
+    assert.match(ok.headers.get("Vary"), /Origin/);
+    const bad = await handler({ request: at(path, { method: "OPTIONS", headers: { Origin: "https://evil.example" } }) });
+    assert.equal(bad.status, 204);
+    assert.equal(bad.headers.get("Access-Control-Allow-Origin"), null);
+    assert.match(bad.headers.get("Vary"), /Origin/);
+    const post = await handler({ request: at(path, { method: "POST", headers: { Origin: MIRROR } }) });
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.get("Access-Control-Allow-Origin"), MIRROR);
+  }
+  const badDate = await onSchedule({ request: at("/schedule?date=x&group=ИС2-241-ОБ", { headers: { Origin: MIRROR } }) });
+  assert.equal(badDate.status, 400);
+  assert.equal(badDate.headers.get("Access-Control-Allow-Origin"), MIRROR);
+
+  // Копия на краю не хранит CORS: один и тот же кэш отдаётся разным Origin с разными заголовками.
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "caches");
+  const store = new Map();
+  const fakeCache = {
+    async match(request) {
+      const hit = store.get(request.url);
+      return hit ? hit.clone() : undefined;
+    },
+    async put(request, response) {
+      assert.equal(response.headers.get("Access-Control-Allow-Origin"), null, "edge copy must not carry ACAO");
+      store.set(request.url, response.clone());
+    },
+  };
+  Object.defineProperty(globalThis, "caches", { value: { default: fakeCache }, configurable: true, writable: true });
+  try {
+    store.set("https://rasp-is2-241.pages.dev/__edge/groups", new Response(JSON.stringify({ ok: true, fetchedAt: new Date().toISOString(), groups: ["ИС2-241-ОБ"] }), {
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    }));
+    const fromMirror = await onGroups({ request: at("/groups", { headers: { Origin: MIRROR } }) });
+    assert.equal(fromMirror.headers.get("X-Rasp-Edge"), "hit");
+    assert.equal(fromMirror.headers.get("Access-Control-Allow-Origin"), MIRROR);
+    assert.deepEqual((await fromMirror.json()).groups, ["ИС2-241-ОБ"]);
+    const fromEvil = await onGroups({ request: at("/groups", { headers: { Origin: "https://evil.example" } }) });
+    assert.equal(fromEvil.headers.get("X-Rasp-Edge"), "hit");
+    assert.equal(fromEvil.headers.get("Access-Control-Allow-Origin"), null);
+    const sameOrigin = await onGroups({ request: at("/groups") });
+    assert.equal(sameOrigin.headers.get("Access-Control-Allow-Origin"), null);
+    assert.equal(sameOrigin.status, 200);
+  } finally {
+    if (saved) Object.defineProperty(globalThis, "caches", saved);
+    else delete globalThis.caches;
+  }
+}
+
+// Версия оболочки совпадает в sw.js и js/app.js; 404.html без ссылок от корня домена.
+{
+  const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+  const version = sw.match(/const SHELL = "(rasp-shell-v\d+)"/)[1];
+  assert.ok(app.includes(`"${version}"`), `js/app.js should expect ${version}`);
+  assert.ok(sw.includes('"https://rasp-is2-241.pages.dev"'), "sw.js should cache cross-origin proxy data");
+  const notFound = readFileSync(new URL("../404.html", import.meta.url), "utf8");
+  assert.equal(/(href|src)="\//.test(notFound), false, "404.html links must be relative");
 }
 
 console.log("selfcheck ok");

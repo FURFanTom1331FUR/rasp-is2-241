@@ -4,9 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="robots" content="noindex" />
+    <script>
+      // Относительные ссылки считаются от корня сайта: «/» на pages.dev, «/rasp-is2-241/» на GitHub Pages.
+      (function () {
+        var root = "/";
+        var match = /\.github\.io$/i.test(location.hostname) && location.pathname.match(/^\/[^\/]+\//);
+        if (match) root = match[0];
+        var base = document.createElement("base");
+        base.href = root;
+        document.head.appendChild(base);
+      })();
+    </script>
     <title>Нет такой страницы · Пары</title>
-    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
-    <link rel="stylesheet" href="/css/app.css" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="css/app.css" />
   </head>
   <body>
     <div class="app">
@@ -14,7 +25,7 @@
         <p class="kicker">Ошибка 404</p>
         <h1 class="hero-date hero-range">Нет такой страницы</h1>
         <p class="weekday">Расписание открывается с главной.</p>
-        <p><a class="text-btn" href="/">Открыть «Пары»</a></p>
+        <p><a class="text-btn" href="./">Открыть «Пары»</a></p>
       </section>
     </div>
   </body>

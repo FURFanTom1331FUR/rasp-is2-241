@@ -25,6 +25,7 @@ import {
   visibleWeekDays,
   weekdayName,
 } from "./dates.js";
+import { apiBase } from "./config.js";
 import { fetchText } from "./net.js";
 import {
   lessonMatchesSubgroup,
@@ -50,9 +51,11 @@ import {
   saveSubgroup,
 } from "./store.js";
 
-// Прокси на том же домене (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
-const LIVE_SCHEDULE = "./schedule";
-const LIVE_GROUPS = "./groups";
+// Прокси (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
+// На pages.dev — тот же домен, с зеркала GitHub Pages — https://rasp-is2-241.pages.dev.
+const API_BASE = apiBase();
+const LIVE_SCHEDULE = `${API_BASE}schedule`;
+const LIVE_GROUPS = `${API_BASE}groups`;
 const LIVE_WINDOWS = 2;
 const LIVE_TIMEOUT_MS = 12000;
 const GROUPS_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -1074,7 +1077,7 @@ function watchServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   const hadController = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener("message", (event) => {
-    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v9" || !hadController) return;
+    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v10" || !hadController) return;
     state.updateReady = true;
     render();
   });
