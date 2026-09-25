@@ -1,4 +1,9 @@
-const SHELL = "rasp-shell-v10";
+// Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
+const SHELL = "rasp-shell-v11";
+const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
+// С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
+// для них worker включается сразу, как раньше.
+const UPDATER_SINCE = 11;
 const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
 const PROXY_TIMEOUT_MS = 10000;
@@ -14,7 +19,9 @@ const FILES = [
   "./js/config.js",
   "./js/attendance.js",
   "./js/net.js",
+  "./js/version.js",
   "./js/app.js",
+  "./version.json",
   "./manifest.webmanifest",
   "./data/groups.json",
   "./data/schedules/ИС2-241-ОБ.json",
@@ -35,6 +42,7 @@ const REQUIRED = [
   "./js/dates.js",
   "./js/parse.js",
   "./js/config.js",
+  "./js/version.js",
 ];
 
 const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
@@ -43,6 +51,7 @@ const PROXY_PATHS = new Set(["./groups", "./schedule"].map((path) => new URL(pat
 // Зеркало на GitHub Pages берёт те же данные с Cloudflare Pages — их тоже держим офлайн.
 const PAGES_ORIGIN = "https://rasp-is2-241.pages.dev";
 const PAGES_PROXY_PATHS = new Set(["/groups", "/schedule"]);
+const VERSION_PATH = new URL("./version.json", self.location.href).pathname;
 
 // Phones still on the network-first worker have HTML that waits on the network
 // before painting. Until the atomic shell update replaces that HTML, answer
@@ -152,23 +161,36 @@ async function fetchBuffered(url, ms, init = {}) {
   }
 }
 
-async function copyPreviousShell(cache) {
+function shellVersion(name) {
+  const match = /^rasp-shell-v(\d+)$/.exec(name);
+  return match ? Number(match[1]) : 0;
+}
+
+async function previousShells() {
   const keys = await caches.keys();
-  const previous = keys.filter((key) => key.startsWith("rasp-shell-") && key !== SHELL);
-  for (const key of previous) {
+  return keys.filter((key) => key.startsWith("rasp-shell-") && key !== SHELL);
+}
+
+// Перенести из старых кэшей то, чего нет в новом: копии расписания, данные, иконки.
+// Код оболочки новый worker уже скачал сам. Ответы прокси при activate берём из старого кэша:
+// пока новый worker ждал, старый мог сохранить более свежее расписание.
+async function copyPreviousEntries(cache, overwriteProxy = false) {
+  for (const key of await previousShells()) {
     const old = await caches.open(key);
     const requests = await old.keys();
     await Promise.all(
       requests.map(async (request) => {
-        const response = await old.match(request);
-        if (!response) return;
-        const path = new URL(request.url).pathname;
+        const url = new URL(request.url);
+        const path = url.pathname;
         const targets = [request];
         if (path.endsWith("/index.html")) targets.push(indexUrl());
         if (path.endsWith("/") || path.endsWith("/index.html")) targets.push(rootUrl());
         for (const target of targets) {
           try {
-            await cache.put(target, response.clone());
+            const present = await cache.match(target);
+            if (present && !(overwriteProxy && isProxyRequest(url))) continue;
+            const response = await old.match(request);
+            if (response) await cache.put(target, response.clone());
           } catch {
             /* Редирект из старого кэша нельзя положить повторно. */
           }
@@ -206,11 +228,25 @@ async function storeFresh(cache, path, response) {
   if (path === "./" || path === "./index.html") await store(cache, rootUrl(), response.clone());
 }
 
+async function freshVersion(fresh) {
+  try {
+    const data = await fresh.get("./version.json")?.clone().json();
+    return Number(data?.version) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Код кладётся в кэш только целиком и только своей версии: если на сайте уже другая версия
+// (или CDN отдал старые файлы), этот worker её не подхватит — для неё будет свой worker.
 async function precache(cache) {
   const fresh = new Map();
   const pending = new Map(FILES.map((path) => [path, loadFresh(fresh, path)]));
-  await Promise.all(["./", "./index.html", ...REQUIRED].map((path) => pending.get(path)));
-  const codeReady = (fresh.has("./") || fresh.has("./index.html")) && REQUIRED.every((path) => fresh.has(path));
+  await Promise.all(["./", "./index.html", "./version.json", ...REQUIRED].map((path) => pending.get(path)));
+  const codeReady =
+    (fresh.has("./") || fresh.has("./index.html")) &&
+    REQUIRED.every((path) => fresh.has(path)) &&
+    (await freshVersion(fresh)) === SW_VERSION;
   if (codeReady) {
     const shellPaths = FILES.filter((path) => !path.startsWith("./data/") && !path.startsWith("./icons/"));
     const ordered = shellPaths.filter((path) => path !== "./").concat("./");
@@ -219,6 +255,7 @@ async function precache(cache) {
   await Promise.all([...pending.values()]);
   const extras = FILES.filter((path) => path.startsWith("./data/") || path.startsWith("./icons/") || path.endsWith(".webmanifest"));
   for (const path of extras) await storeFresh(cache, path, fresh.get(path));
+  return codeReady;
 }
 
 let shellRefresh = null;
@@ -278,28 +315,38 @@ async function dropOlderSchedules(cache, url) {
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
+      const previous = await previousShells();
+      const updating = Boolean(self.registration.active);
+      const legacy = previous.length > 0 && Math.max(...previous.map(shellVersion)) < UPDATER_SINCE;
       const cache = await caches.open(SHELL);
-      await copyPreviousShell(cache);
       await purgeBadData(SHELL);
       await purgeBadData(DATA_CACHE);
-      if (!(await hasDocument(cache))) {
-        await precache(cache);
-        if (!(await hasDocument(cache))) throw new Error("shell not cached");
-      }
-      await self.skipWaiting();
+      const ready = await precache(cache);
+      // Обновление без полного свежего кода не ставим: старая версия работает дальше,
+      // браузер попробует снова при следующей проверке.
+      if (!ready && (updating || !(await hasDocument(cache)))) throw new Error("fresh shell not cached");
+      await copyPreviousEntries(cache);
+      if (!updating || legacy) await self.skipWaiting();
     })(),
   );
 });
 
+// Кнопка «Обновить» в приложении.
+self.addEventListener("message", (event) => {
+  const type = event.data?.type;
+  if (type === "skip-waiting") event.waitUntil(self.skipWaiting());
+  else if (type === "version") event.source?.postMessage({ type: "rasp-version", version: SW_VERSION });
+});
+
 self.addEventListener("activate", (event) => {
   // Не ждать сеть: пока activate не завершится, Chrome не отдаёт fetch,
-  // и зависший precache снова заморозил бы открытие.
+  // и зависший precache снова заморозил бы открытие. Здесь только локальные кэши.
   event.waitUntil(
     (async () => {
-      const keys = await caches.keys();
-      await Promise.all(
-        keys.filter((key) => key.startsWith("rasp-shell-") && key !== SHELL).map((key) => caches.delete(key)),
-      );
+      const cache = await caches.open(SHELL);
+      await copyPreviousEntries(cache, true);
+      const keys = await previousShells();
+      await Promise.all(keys.map((key) => caches.delete(key)));
       await self.clients.claim();
       const windows = await self.clients.matchAll({ type: "window" });
       for (const client of windows) client.postMessage({ type: "rasp-shell", version: SHELL });
@@ -431,6 +478,8 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
+  // version.json — только сеть: по нему приложение узнаёт о новой версии.
+  if (url.pathname === VERSION_PATH) return;
   if (isDataRequest(url)) {
     event.respondWith(networkThenCache(event.request));
     return;

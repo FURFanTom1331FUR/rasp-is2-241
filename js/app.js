@@ -26,6 +26,7 @@ import {
   weekdayName,
 } from "./dates.js";
 import { apiBase } from "./config.js";
+import { APP_CHANGES, APP_DATE, APP_VERSION, isNewer, normalizeVersionInfo, reloadAllowed } from "./version.js";
 import { fetchText } from "./net.js";
 import {
   lessonMatchesSubgroup,
@@ -85,7 +86,20 @@ const state = {
   notifyNote: "",
   seenToday: "",
   lastRefresh: 0,
-  updateReady: false,
+  update: {
+    // Новая версия с сайта: { version, date, changes }.
+    available: null,
+    // Новый service worker скачан и ждёт кнопку «Обновить».
+    waiting: false,
+    // Новый worker уже управляет страницей (другая вкладка или старая версия обновилась сама).
+    activated: false,
+    applying: false,
+    checking: false,
+    dismissed: 0,
+    note: "",
+    // «Обновлено до версии N» — один раз после обновления.
+    justUpdated: false,
+  },
   attendance: {
     error: "",
     loading: false,
@@ -731,6 +745,7 @@ function moreView() {
   const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
+    ${versionBlock()}
     <article class="block">
       <h2>Напоминание</h2>
       <p>За 10 минут до следующей пары, пока приложение открыто. Если выбрана подгруппа, напоминание приходит только по общим парам и парам этой подгруппы. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
@@ -813,12 +828,51 @@ function nav() {
     .join("")}</nav>`;
 }
 
-function updateToast() {
-  if (!state.updateReady) return "";
-  return `<div class="update-toast" role="status">
-    <p>Доступно обновление</p>
-    <button type="button" class="text-btn" data-action="apply-update">Перезагрузить</button>
+function changesHtml(changes) {
+  if (!changes?.length) return "";
+  return `<ul class="update-changes">${changes.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`;
+}
+
+function updateBanner() {
+  const update = state.update;
+  if (update.justUpdated) {
+    return `<div class="update-banner" role="status">
+      <p class="update-title">Обновлено до версии ${APP_VERSION}</p>
+      <p class="update-date">от ${esc(formatDots(APP_DATE))}</p>
+      ${changesHtml(APP_CHANGES)}
+      <div class="update-actions"><button type="button" class="primary" data-action="seen-update">Понятно</button></div>
+    </div>`;
+  }
+  const info = update.available;
+  const pending = update.activated || update.waiting || isNewer(info);
+  if (!pending) return "";
+  if (!update.applying && update.dismissed && update.dismissed >= (info?.version || 0)) return "";
+  const title = info?.version ? `Доступно обновление — версия ${info.version}` : "Доступно обновление";
+  return `<div class="update-banner" role="alert">
+    <p class="update-title">${esc(title)}</p>
+    ${info?.date ? `<p class="update-date">от ${esc(formatDots(info.date))}</p>` : ""}
+    ${changesHtml(info?.changes)}
+    ${update.note ? `<p class="update-note">${esc(update.note)}</p>` : ""}
+    <div class="update-actions">
+      <button type="button" class="primary" data-action="apply-update" ${update.applying ? "disabled" : ""}>${update.applying ? "Обновляем…" : "Обновить"}</button>
+      ${update.applying ? "" : `<button type="button" class="ghost" data-action="later-update">Позже</button>`}
+    </div>
   </div>`;
+}
+
+function versionBlock() {
+  const update = state.update;
+  const newer = isNewer(update.available);
+  const note = update.checking
+    ? "Проверяем…"
+    : update.note || (newer ? `Доступно обновление — версия ${update.available.version}.` : "");
+  return `<article class="block">
+      <h2>Приложение</h2>
+      <p>Версия ${APP_VERSION} от ${esc(formatDots(APP_DATE))}.</p>
+      <button class="ghost" type="button" data-action="check-update" ${update.checking ? "disabled" : ""}>Проверить обновления</button>
+      ${newer ? `<button class="primary" type="button" data-action="apply-update">Обновить до версии ${update.available.version}</button>` : ""}
+      ${note ? `<p class="status" role="status">${esc(note)}</p>` : ""}
+    </article>`;
 }
 
 function render() {
@@ -844,7 +898,7 @@ function render() {
     </header>
     <main>${main}</main>
     ${nav()}
-    ${updateToast()}
+    ${updateBanner()}
     ${state.pickerOpen ? pickerHtml() : ""}`;
 }
 
@@ -1010,7 +1064,14 @@ app.addEventListener("click", (event) => {
       state.installEvent = null;
       render();
     });
-  } else if (action === "apply-update") location.reload();
+  } else if (action === "apply-update") applyUpdate();
+  else if (action === "later-update") {
+    state.update.dismissed = state.update.available?.version || APP_VERSION + 1;
+    render();
+  } else if (action === "seen-update") {
+    state.update.justUpdated = false;
+    render();
+  } else if (action === "check-update") checkForUpdate(true);
   else if (action === "notify-on") enableNotify();
   else if (action === "notify-off") {
     saveNotify(false);
@@ -1061,37 +1122,257 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pageshow", () => tick());
 
-function offerUpdate(worker, hadController) {
+// Обновления приложения. version.json лежит на сайте и не кэшируется; номер в нём сравнивается
+// с APP_VERSION из кода. Новый service worker скачивает всю версию заранее и ждёт кнопку «Обновить».
+const VERSION_KEY = "rasp.appVersion";
+const RELOAD_KEY = "rasp.updateReload";
+const UPDATE_CHECK_EVERY_MS = 30 * 60 * 1000;
+const UPDATE_CHECK_GAP_MS = 60 * 1000;
+const UPDATE_WAIT_MS = 30000;
+let swRegistration = null;
+let hadController = false;
+let updateRequested = false;
+let lastUpdateCheck = 0;
+
+function noteFirstRunOfVersion() {
+  let seen = 0;
+  let used = false;
+  try {
+    seen = Number(localStorage.getItem(VERSION_KEY)) || 0;
+    used = Boolean(localStorage.getItem("rasp.group"));
+    localStorage.setItem(VERSION_KEY, String(APP_VERSION));
+    sessionStorage.removeItem(RELOAD_KEY);
+  } catch {
+    return;
+  }
+  // До версии 11 номер не запоминался: если группа уже была выбрана, это обновление, а не установка.
+  if (seen ? seen < APP_VERSION : used) state.update.justUpdated = true;
+}
+
+async function fetchRemoteVersion() {
+  const response = await fetchText(`./version.json?t=${Date.now()}`, { cache: "no-store" }, 8000);
+  if (!response.ok) return null;
+  return normalizeVersionInfo(JSON.parse(response.text));
+}
+
+// Без сети — описание новой версии из кэша, который уже скачал ждущий worker.
+async function cachedNewerVersion() {
+  try {
+    const own = new URL("./version.json", location.href).href;
+    for (const key of await caches.keys()) {
+      const match = /^rasp-shell-v(\d+)$/.exec(key);
+      if (!match || Number(match[1]) <= APP_VERSION) continue;
+      const hit = await (await caches.open(key)).match(own);
+      const info = hit ? normalizeVersionInfo(await hit.json()) : null;
+      if (info) return info;
+    }
+  } catch {
+    /* Нет доступа к кэшу — покажем баннер без списка изменений. */
+  }
+  return null;
+}
+
+// Полная перерисовка стёрла бы набираемый текст (выбор группы, вход, дата) —
+// в таком случае обновляется только баннер.
+function refreshUpdateUi() {
+  const typing = document.activeElement?.matches?.("input, textarea, select");
+  if (!state.pickerOpen && !typing) {
+    render();
+    return;
+  }
+  const html = updateBanner();
+  const current = app.querySelector(".update-banner");
+  if (current) current.outerHTML = html;
+  else if (html) app.querySelector(".nav")?.insertAdjacentHTML("afterend", html);
+}
+
+function syncWaiting() {
+  state.update.waiting = Boolean(hadController && swRegistration?.waiting);
+}
+
+async function checkForUpdate(manual = false) {
+  const update = state.update;
+  if (update.checking) return;
+  lastUpdateCheck = Date.now();
+  update.checking = manual;
+  if (manual) {
+    update.note = "";
+    render();
+  }
+  let remote = null;
+  let reached = false;
+  try {
+    await swRegistration?.update();
+  } catch {
+    /* sw.js недоступен — проверим по version.json. */
+  }
+  try {
+    remote = await fetchRemoteVersion();
+    reached = Boolean(remote);
+  } catch {
+    remote = null;
+  }
+  syncWaiting();
+  if (!isNewer(remote) && (update.waiting || update.activated)) remote = (await cachedNewerVersion()) || remote;
+  if (isNewer(remote)) update.available = remote;
+  update.checking = false;
+  if (manual) {
+    if (isNewer(update.available) || update.waiting || update.activated) {
+      update.dismissed = 0;
+      update.note = "";
+    } else {
+      update.note = reached ? "У вас последняя версия." : "Не удалось проверить: нет связи с сайтом.";
+    }
+  }
+  refreshUpdateUi();
+}
+
+function reloadOnce(reason) {
+  const target = String(state.update.available?.version || "next");
+  let previous = null;
+  try {
+    previous = JSON.parse(sessionStorage.getItem(RELOAD_KEY) || "null");
+  } catch {
+    previous = null;
+  }
+  if (!reloadAllowed(previous, target)) {
+    state.update.applying = false;
+    state.update.note = "Обновление не установилось. Проверьте интернет и нажмите «Обновить» ещё раз.";
+    render();
+    return false;
+  }
+  try {
+    sessionStorage.setItem(RELOAD_KEY, JSON.stringify({ version: target, at: Date.now(), reason }));
+  } catch {
+    /* Без sessionStorage защита держится на флаге ниже. */
+  }
+  if (reloadOnce.done) return false;
+  reloadOnce.done = true;
+  location.reload();
+  return true;
+}
+
+function waitForWaiting(registration, ms) {
+  return new Promise((resolve) => {
+    if (registration.waiting) {
+      resolve(registration.waiting);
+      return;
+    }
+    const timer = setTimeout(() => finish(registration.waiting || null), ms);
+    const watched = new Set();
+    function finish(worker) {
+      clearTimeout(timer);
+      registration.removeEventListener("updatefound", watchInstalling);
+      resolve(worker);
+    }
+    function watchInstalling() {
+      const worker = registration.installing;
+      if (!worker || watched.has(worker)) return;
+      watched.add(worker);
+      worker.addEventListener("statechange", () => {
+        if (worker.state === "installed") finish(worker);
+        else if (worker.state === "activated" || worker.state === "redundant") finish(registration.waiting || null);
+      });
+    }
+    registration.addEventListener("updatefound", watchInstalling);
+    watchInstalling();
+  });
+}
+
+async function applyUpdate() {
+  const update = state.update;
+  if (update.applying) return;
+  update.applying = true;
+  update.note = "";
+  render();
+  updateRequested = true;
+  if (update.activated || !("serviceWorker" in navigator)) {
+    reloadOnce("activated");
+    return;
+  }
+  let registration = swRegistration;
+  try {
+    registration = registration || (await navigator.serviceWorker.getRegistration());
+  } catch {
+    registration = null;
+  }
+  if (!registration) {
+    reloadOnce("no-worker");
+    return;
+  }
+  let worker = registration.waiting;
+  if (!worker) {
+    try {
+      await registration.update();
+    } catch {
+      /* Нет сети — ниже подождём, вдруг скачивание уже идёт. */
+    }
+    worker = await waitForWaiting(registration, UPDATE_WAIT_MS);
+  }
+  if (worker) {
+    // Дальше controllerchange → одна перезагрузка.
+    worker.postMessage({ type: "skip-waiting" });
+    setTimeout(() => {
+      if (update.applying && !reloadOnce.done) reloadOnce("timeout");
+    }, 10000);
+    return;
+  }
+  // Ждущего worker нет: либо новая версия уже активна, либо её не удалось скачать.
+  reloadOnce("no-waiting");
+}
+
+function watchWorker(worker) {
   if (!worker || !hadController) return;
   const notify = () => {
-    if (worker.state !== "installed" && worker.state !== "activated") return;
-    if (!navigator.serviceWorker.controller) return;
-    state.updateReady = true;
-    render();
+    if (worker.state !== "installed") return;
+    syncWaiting();
+    cachedNewerVersion().then((info) => {
+      if (info && !isNewer(state.update.available)) state.update.available = info;
+      refreshUpdateUi();
+    });
   };
-  if (worker.state === "installed" || worker.state === "activated") notify();
+  notify();
   worker.addEventListener("statechange", notify);
 }
 
 function watchServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
-  const hadController = Boolean(navigator.serviceWorker.controller);
+  hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController) return;
+    if (updateRequested) {
+      reloadOnce("controllerchange");
+      return;
+    }
+    state.update.activated = true;
+    refreshUpdateUi();
+  });
   navigator.serviceWorker.addEventListener("message", (event) => {
-    if (event.data?.type !== "rasp-shell" || event.data.version !== "rasp-shell-v10" || !hadController) return;
-    state.updateReady = true;
-    render();
+    if (event.data?.type !== "rasp-shell" || !hadController) return;
+    if (event.data.version === `rasp-shell-v${APP_VERSION}`) return;
+    state.update.activated = true;
+    if (!updateRequested) refreshUpdateUi();
   });
   navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then((registration) => {
+    swRegistration = registration;
     state.swReady = true;
-    offerUpdate(registration.installing, hadController);
-    offerUpdate(registration.waiting, hadController);
-    registration.addEventListener("updatefound", () => offerUpdate(registration.installing, hadController));
-    if (state.mode === "more") render();
-    registration.update().catch(() => {});
+    watchWorker(registration.installing);
+    watchWorker(registration.waiting);
+    registration.addEventListener("updatefound", () => watchWorker(registration.installing));
+    syncWaiting();
+    if (state.mode === "more" || state.update.waiting) refreshUpdateUi();
+    checkForUpdate(false);
   }).catch(() => {});
 }
 
+noteFirstRunOfVersion();
 watchServiceWorker();
+setInterval(() => {
+  if (document.visibilityState === "visible") checkForUpdate(false);
+}, UPDATE_CHECK_EVERY_MS);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - lastUpdateCheck > UPDATE_CHECK_GAP_MS) checkForUpdate(false);
+});
 
 let attendanceToken = 0;
 
