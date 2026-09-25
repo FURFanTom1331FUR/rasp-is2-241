@@ -5,7 +5,7 @@ import { onRequest as onAttendance } from "../functions/attendance.js";
 import { onRequest as onLogout } from "../functions/logout.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
-import { parseScheduleHtml } from "../js/parse.js";
+import { lessonMatchesSubgroup, lessonSubgroup, parseScheduleHtml, subgroupNumberIn, subjectMatchesSubgroup, subjectSubgroup } from "../js/parse.js";
 
 assert.equal(moscowIso(new Date("2026-09-22T21:00:00.000Z")), "2026-09-23");
 assert.equal(moscowIso(new Date("2026-09-22T20:59:00.000Z")), "2026-09-22");
@@ -134,10 +134,31 @@ const fixture = `
     <div>воскресенье</div>
     <table><tr><td>Нет пар.</td></tr></table>
   </div>
+  <div>
+    <div><strong>24 сентября 2026</strong></div>
+    <div>четверг</div>
+    <table>
+      <tr>
+        <td>10:10-11:40</td>
+        <td>пр. Web-разработка (1 п/г)<br/>ИС2-241-ОБ<br/><a>215Комп/Гл</a><br/>Иванов И.И.</td>
+      </tr>
+      <tr>
+        <td rowspan="2">11:50-13:20</td>
+        <td>лаб. Предмет<br/>(2пг)<br/>ИС2-241-ОБ<br/><a>97Комп/Гл</a><br/>Петров П.П.</td>
+      </tr>
+      <tr>
+        <td>лек. Общая<br/>1 пг<br/>ИС2-241-ОБ<br/><a>сз /Гл</a><br/>Сидоров С.С.</td>
+      </tr>
+      <tr>
+        <td>13:40-15:10</td>
+        <td>пр. Подгруппы в названии<br/>подгруппа 2<br/>ИС2-241-ОБ<br/><a>119Л/7к</a><br/>Орлова О.О.</td>
+      </tr>
+    </table>
+  </div>
 </div>`;
 
 const days = parseScheduleHtml(fixture);
-assert.equal(days.length, 2);
+assert.equal(days.length, 3);
 assert.equal(days[0].date, "2026-09-23");
 assert.equal(days[1].date, "2026-09-27");
 assert.equal(days[1].lessons.length, 0);
@@ -162,5 +183,54 @@ assert.equal(lab.time, "17:00-18:30");
 const lecture = days[0].lessons.find((lesson) => lesson.subject === "Экономика");
 assert.equal(lecture.type, "лек");
 assert.deepEqual(lecture.groups, ["ИС2-241-ОБ", "ИС2-242-ОБ"]);
+
+const variants = days.find((day) => day.date === "2026-09-24").lessons;
+const web = variants.find((lesson) => lesson.subject === "Web-разработка");
+assert.equal(web.subgroup, "1 п.г.");
+assert.equal(web.room, "215Комп/Гл");
+assert.equal(lessonSubgroup(web), 1);
+const subjectOnly = variants.find((lesson) => lesson.subject === "Предмет");
+assert.equal(subjectOnly.subgroup, "2 п.г.");
+assert.equal(subjectOnly.room, "97Комп/Гл");
+const shortMark = variants.find((lesson) => lesson.subject === "Общая");
+assert.equal(shortMark.subgroup, "1 п.г.");
+assert.equal(shortMark.room, "сз /Гл");
+const worded = variants.find((lesson) => lesson.subject === "Подгруппы в названии");
+assert.equal(worded.subgroup, "2 п.г.");
+assert.equal(worded.room, "119Л/7к");
+assert.equal(subgroupNumberIn("215Комп/Гл"), null);
+assert.equal(subgroupNumberIn("97Комп/Гл"), null);
+assert.equal(subgroupNumberIn("(1пг)"), 1);
+assert.equal(subgroupNumberIn("2-я подгруппа"), 2);
+assert.equal(subgroupNumberIn("1 п.г."), 1);
+
+const sample = [
+  { subject: "Общая лекция", subgroup: null },
+  { subject: "Лабораторная", subgroup: "1 п.г." },
+  { subject: "Другая лабораторная", subgroup: "2 п.г." },
+];
+assert.deepEqual(sample.filter((lesson) => lessonMatchesSubgroup(lesson, "all")).map((lesson) => lesson.subject), [
+  "Общая лекция",
+  "Лабораторная",
+  "Другая лабораторная",
+]);
+assert.deepEqual(sample.filter((lesson) => lessonMatchesSubgroup(lesson, "1")).map((lesson) => lesson.subject), [
+  "Общая лекция",
+  "Лабораторная",
+]);
+assert.deepEqual(sample.filter((lesson) => lessonMatchesSubgroup(lesson, "2")).map((lesson) => lesson.subject), [
+  "Общая лекция",
+  "Другая лабораторная",
+]);
+assert.equal(lessonMatchesSubgroup({ subject: "Комп", room: "215Комп/Гл", subgroup: null }, "1"), true);
+assert.equal(subjectSubgroup({ name: "Лабораторная (2 пг)", type: "лаб" }, []), 2);
+assert.equal(subjectMatchesSubgroup({ name: "Лабораторная (2 пг)", type: "лаб" }, "1"), false);
+assert.equal(subjectMatchesSubgroup({ name: "Лабораторная", type: "лаб" }, "1", sample), true);
+assert.equal(subjectMatchesSubgroup({ name: "Лабораторная", type: "лаб" }, "2", sample), false);
+assert.equal(subjectMatchesSubgroup({ name: "Экономика", type: "лек" }, "2", sample), true);
+assert.equal(subjectSubgroup({ name: "Лабораторная", type: "" }, [
+  { subject: "Лабораторная", subgroup: "1 п.г." },
+  { subject: "Лабораторная", subgroup: "2 п.г." },
+]), null);
 
 console.log("selfcheck ok");

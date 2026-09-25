@@ -49,9 +49,15 @@ MONTHS = {
 }
 
 TYPE_RE = re.compile(r"^(лек|лаб|пр)\.\s*(.+)$", re.IGNORECASE)
-SUBGROUP_RE = re.compile(r"^(\d+)\s*п\.г\.?$", re.IGNORECASE)
 DATE_RE = re.compile(r"(\d{1,2})\s+([а-яё]+)\s+(\d{4})", re.IGNORECASE)
 TIME_RE = re.compile(r"(\d{2}:\d{2})-(\d{2}:\d{2})")
+SUBGROUP_BODY = r"(\d)\s*п\s*[./]?\s*г\.?|(\d)\s*[-–]?\s*(?:я|ая|й)?\s*подгруппа|подгруппа\s+(\d)"
+SUBGROUP_MARK = re.compile(rf"(?:^|[\s(«\"'])(?:{SUBGROUP_BODY})(?=$|[\s).,;:»\"'])", re.IGNORECASE)
+SUBGROUP_LINE = re.compile(rf"^(?:\(\s*)?(?:{SUBGROUP_BODY})\s*\)?\.?$", re.IGNORECASE)
+SUBGROUP_STRIP = re.compile(
+    r"(?:^|\s)\(?\s*(?:\d\s*п\s*[./]?\s*г\.?|\d\s*[-–]?\s*(?:я|ая|й)?\s*подгруппа|подгруппа\s+\d)\s*\)?(?=$|[\s.,;:])",
+    re.IGNORECASE,
+)
 
 
 def now_msk_iso() -> str:
@@ -95,6 +101,30 @@ def parse_ru_date(label: str) -> str | None:
         return None
 
 
+def _subgroup_from_match(match: re.Match[str] | None) -> int | None:
+    if not match:
+        return None
+    raw = next((group for group in match.groups() if group), None)
+    if not raw:
+        return None
+    number = int(raw)
+    return number if 1 <= number <= 9 else None
+
+
+def subgroup_number_in(value: str) -> int | None:
+    text = re.sub(r"\s+", " ", (value or "").replace("\xa0", " ")).strip()
+    if not text:
+        return None
+    return _subgroup_from_match(SUBGROUP_LINE.match(text)) or _subgroup_from_match(SUBGROUP_MARK.search(text))
+
+
+def strip_subgroup_mark(value: str) -> str:
+    text = SUBGROUP_STRIP.sub(" ", (value or "").replace("\xa0", " "))
+    text = re.sub(r"\s+([.,;:])", r"\1", text)
+    text = re.sub(r"\(\s*\)", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def parse_cell(cell_html: str, slot: str | None) -> dict | None:
     lines = lines_of(cell_html)
     if not lines or not slot:
@@ -102,19 +132,38 @@ def parse_cell(cell_html: str, slot: str | None) -> dict | None:
     if len(lines) == 1 and lines[0].lower().startswith("нет пар"):
         return None
 
-    subject = lines[0]
+    subgroup = None
+    kept: list[str] = []
+    for line in lines:
+        dedicated = _subgroup_from_match(SUBGROUP_LINE.match(re.sub(r"\s+", " ", line).strip()))
+        if dedicated:
+            subgroup = subgroup or dedicated
+            continue
+        kept.append(line)
+    if not kept:
+        return None
+
+    subject = kept[0]
     lesson_type = None
     type_match = TYPE_RE.match(subject)
     if type_match:
         lesson_type = type_match.group(1).lower()
         subject = type_match.group(2).strip()
+    found = subgroup_number_in(subject)
+    if found:
+        subgroup = subgroup or found
+        subject = strip_subgroup_mark(subject)
+    if not subject:
+        return None
 
-    rest = lines[1:]
-    subgroup = None
-    subgroup_match = SUBGROUP_RE.match(rest[0]) if rest else None
-    if subgroup_match:
-        subgroup = f"{subgroup_match.group(1)} п.г."
-        rest = rest[1:]
+    rest: list[str] = []
+    for line in kept[1:]:
+        found = subgroup_number_in(line)
+        if found:
+            subgroup = subgroup or found
+            line = strip_subgroup_mark(line)
+        if line:
+            rest.append(line)
 
     teacher = rest[-1] if rest else ""
     room = rest[-2] if len(rest) >= 2 else ""
@@ -126,7 +175,7 @@ def parse_cell(cell_html: str, slot: str | None) -> dict | None:
         "end": end,
         "type": lesson_type,
         "subject": subject,
-        "subgroup": subgroup,
+        "subgroup": f"{subgroup} п.г." if subgroup else None,
         "room": room,
         "teacher": teacher,
         "groups": groups,
