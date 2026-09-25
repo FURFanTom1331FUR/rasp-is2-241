@@ -3,6 +3,7 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 import { fetchText } from "../js/net.js";
 import { apiBase, isProxyHost, PAGES_ORIGIN } from "../js/config.js";
+import { APP_CHANGES, APP_DATE, APP_VERSION, isNewer, normalizeVersionInfo, reloadAllowed, RELOAD_GUARD_MS } from "../js/version.js";
 import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, AttendanceError, configuredWorkerUrl, markOf, normalizeAttendance, normalizeWorkerUrl, summarizeAttendance } from "../js/attendance.js";
 import { onRequest as onLogin } from "../functions/login.js";
 import { onRequest as onAttendance } from "../functions/attendance.js";
@@ -418,11 +419,31 @@ assert.equal(isProxyHost("rasp-is2-241.pages.dev.evil.com"), false);
 {
   const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
   const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
-  const version = sw.match(/const SHELL = "(rasp-shell-v\d+)"/)[1];
-  assert.ok(app.includes(`"${version}"`), `js/app.js should expect ${version}`);
+  const shellVersion = Number(sw.match(/const SHELL = "rasp-shell-v(\d+)"/)[1]);
+  assert.equal(shellVersion, APP_VERSION, "SHELL в sw.js и APP_VERSION в js/version.js должны совпадать");
+  const published = JSON.parse(readFileSync(new URL("../version.json", import.meta.url), "utf8"));
+  assert.equal(published.version, APP_VERSION, "version.json: номер версии");
+  assert.equal(published.date, APP_DATE, "version.json: дата");
+  assert.deepEqual(published.changes, APP_CHANGES, "version.json: список изменений");
+  assert.ok(APP_CHANGES.length > 0);
+  assert.ok(sw.includes('"./js/version.js"'), "js/version.js в оболочке service worker");
+  assert.ok(app.includes("APP_VERSION"), "js/app.js сравнивает версии");
   assert.ok(sw.includes('"https://rasp-is2-241.pages.dev"'), "sw.js should cache cross-origin proxy data");
   const notFound = readFileSync(new URL("../404.html", import.meta.url), "utf8");
   assert.equal(/(href|src)="\//.test(notFound), false, "404.html links must be relative");
 }
+
+// Обновления: разбор version.json и защита от цикла перезагрузок.
+assert.deepEqual(normalizeVersionInfo({ version: 12, date: "2026-10-01", changes: [" Новое ", "", 5] }), { version: 12, date: "2026-10-01", changes: ["Новое", "5"] });
+assert.equal(normalizeVersionInfo({ version: "x" }), null);
+assert.equal(normalizeVersionInfo(null), null);
+assert.equal(normalizeVersionInfo({ version: 3, date: "вчера" }).date, "");
+assert.equal(isNewer({ version: APP_VERSION + 1 }), true);
+assert.equal(isNewer({ version: APP_VERSION }), false);
+assert.equal(isNewer(null), false);
+assert.equal(reloadAllowed(null, "12", 1000), true);
+assert.equal(reloadAllowed({ version: "12", at: 1000 }, "12", 1000 + 5000), false);
+assert.equal(reloadAllowed({ version: "12", at: 1000 }, "12", 1000 + RELOAD_GUARD_MS), true);
+assert.equal(reloadAllowed({ version: "11", at: 1000 }, "12", 1001), true);
 
 console.log("selfcheck ok");
