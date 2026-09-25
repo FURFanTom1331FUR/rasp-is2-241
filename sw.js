@@ -1,5 +1,7 @@
-const SHELL = "rasp-shell-v8";
+const SHELL = "rasp-shell-v9";
+const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
+const PROXY_TIMEOUT_MS = 10000;
 const UPDATE_TIMEOUT_MS = 15000;
 
 const FILES = [
@@ -36,6 +38,8 @@ const REQUIRED = [
 ];
 
 const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
+// Прокси расписания (functions/groups.js, functions/schedule.js): сеть с таймаутом, потом копия.
+const PROXY_PATHS = new Set(["./groups", "./schedule"].map((path) => new URL(path, self.location.href).pathname));
 
 // Phones still on the network-first worker have HTML that waits on the network
 // before painting. Until the atomic shell update replaces that HTML, answer
@@ -101,8 +105,27 @@ async function materialize(response) {
   });
 }
 
+function isProxyRequest(url) {
+  return PROXY_PATHS.has(url.pathname);
+}
+
+function isDataRequest(url) {
+  return url.pathname.includes("/data/");
+}
+
+function wantsJson(key) {
+  const url = new URL(typeof key === "string" ? key : key.url, self.location.href);
+  return isDataRequest(url) || isProxyRequest(url);
+}
+
+function isJson(response) {
+  return /\bjson\b/i.test(response?.headers?.get("Content-Type") || "");
+}
+
 async function store(cache, key, response) {
   if (!response || response.status !== 200 || response.type === "opaque" || response.type === "opaqueredirect") return false;
+  // Без 404.html Pages отвечал index.html с кодом 200 — такой ответ не должен лечь под ключ JSON.
+  if (wantsJson(key) && !isJson(response)) return false;
   try {
     const clean = await materialize(response);
     if (!clean || clean.status !== 200) return false;
@@ -212,11 +235,44 @@ function refreshShell() {
   return shellRefresh;
 }
 
+// Убрать из кэша HTML и ошибки, сохранённые под адресами данных старыми версиями.
+async function purgeBadData(cacheName) {
+  try {
+    if (!(await caches.has(cacheName))) return;
+    const cache = await caches.open(cacheName);
+    for (const request of await cache.keys()) {
+      if (!wantsJson(request)) continue;
+      const response = await cache.match(request);
+      if (!response || response.status !== 200 || !isJson(response)) await cache.delete(request);
+    }
+  } catch {
+    /* Чистка необязательна. */
+  }
+}
+
+// Для /schedule держим одну копию на группу: новое окно заменяет старое.
+async function dropOlderSchedules(cache, url) {
+  if (!url.pathname.endsWith("/schedule")) return;
+  const group = url.searchParams.get("group");
+  try {
+    for (const request of await cache.keys()) {
+      const other = new URL(request.url);
+      if (other.pathname === url.pathname && other.searchParams.get("group") === group && other.href !== url.href) {
+        await cache.delete(request);
+      }
+    }
+  } catch {
+    /* Лишняя копия не мешает. */
+  }
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(SHELL);
       await copyPreviousShell(cache);
+      await purgeBadData(SHELL);
+      await purgeBadData(DATA_CACHE);
       if (!(await hasDocument(cache))) {
         await precache(cache);
         if (!(await hasDocument(cache))) throw new Error("shell not cached");
@@ -247,10 +303,6 @@ async function matchCached(cache, request) {
     return (await cache.match(request, { ignoreSearch: true })) || (await hasDocument(cache)) || undefined;
   }
   return (await cache.match(request)) || undefined;
-}
-
-function isDataRequest(url) {
-  return url.pathname.includes("/data/");
 }
 
 async function upgradeNavigation(response) {
@@ -323,11 +375,40 @@ async function networkThenCache(request) {
   return offlineResponse();
 }
 
+function withFallback(response, reason) {
+  const headers = safeHeaders(response);
+  headers.set("X-Rasp-Fallback", reason);
+  return new Response(response.body, { status: 200, headers });
+}
+
+async function proxyThenCache(request) {
+  const cache = await caches.open(SHELL);
+  const url = new URL(request.url);
+  let fresh = null;
+  try {
+    fresh = await fetchBuffered(url.href, PROXY_TIMEOUT_MS);
+  } catch {
+    fresh = null;
+  }
+  if (fresh && fresh.status === 200 && isJson(fresh)) {
+    if (await store(cache, url.href, fresh.clone())) await dropOlderSchedules(cache, url);
+    return fresh;
+  }
+  const cached = await cache.match(url.href);
+  // «upstream» — сервер ответил ошибкой (ВГЛТУ молчит), «offline» — до сервера не дошли.
+  if (cached) return withFallback(cached, fresh ? "upstream" : "offline");
+  return fresh || offlineResponse();
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
   if (API_PATHS.has(path)) return;
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
+  if (isProxyRequest(url)) {
+    event.respondWith(proxyThenCache(event.request));
+    return;
+  }
   if (isDataRequest(url)) {
     event.respondWith(networkThenCache(event.request));
     return;

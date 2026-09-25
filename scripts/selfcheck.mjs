@@ -5,6 +5,9 @@ import { ATTENDANCE_NETWORK_MESSAGE, asAttendanceError, AttendanceError, configu
 import { onRequest as onLogin } from "../functions/login.js";
 import { onRequest as onAttendance } from "../functions/attendance.js";
 import { onRequest as onLogout } from "../functions/logout.js";
+import { onRequest as onSchedule } from "../functions/schedule.js";
+import { onRequest as onGroups } from "../functions/groups.js";
+import { cachedJson, fetchUpstream, isGroupCode, isIsoDate, loadGroups, loadSchedule, shiftIso, UpstreamError, windowCount } from "../functions/_kis.js";
 import { addDays, formatDots, isValidIso, mondayOf, moscowInstant, moscowIso, semesterRange, visibleWeekDays, weekdayName } from "../js/dates.js";
 import { dateAttempts, studentNameFromHtml } from "../worker/src/index.js";
 import { lessonMatchesSubgroup, lessonSubgroup, parseScheduleHtml, subgroupNumberIn, subjectMatchesSubgroup, subjectSubgroup } from "../js/parse.js";
@@ -279,5 +282,53 @@ const quick = await new Promise((resolve, reject) => {
   });
 });
 assert.equal(quick, undefined);
+
+// Прокси расписания: проверка параметров, разбор, ошибки ВГЛТУ.
+assert.equal(isIsoDate("2026-09-25"), true);
+assert.equal(isIsoDate("2026-02-30"), false);
+assert.equal(isIsoDate("25.09.2026"), false);
+assert.equal(isGroupCode("ИС2-241-ОБ"), true);
+assert.equal(isGroupCode("<script>"), false);
+assert.equal(isGroupCode(""), false);
+assert.equal(shiftIso("2026-09-21", 14), "2026-10-05");
+assert.equal(windowCount("9"), 3);
+assert.equal(windowCount("x"), 1);
+assert.equal((await onSchedule({ request: new Request("https://x.test/schedule?date=2026-13-01&group=ИС2-241-ОБ") })).status, 400);
+assert.equal((await onSchedule({ request: new Request("https://x.test/schedule?date=2026-09-21&group=%3Cb%3E") })).status, 400);
+assert.equal((await onSchedule({ request: new Request("https://x.test/schedule", { method: "POST" }) })).status, 405);
+assert.equal((await onGroups({ request: new Request("https://x.test/groups", { method: "POST" }) })).status, 405);
+{
+  const seen = [];
+  const fakeFetch = async (url, init) => {
+    seen.push({ url, encoding: init.headers["Accept-Encoding"] });
+    return new Response(fixture, { status: 200, headers: { "Content-Type": "text/html" } });
+  };
+  const record = await loadSchedule("ИС2-241-ОБ", "2026-09-21", 2, fakeFetch);
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every((item) => item.encoding === "gzip"));
+  assert.ok(seen[1].url.includes("date=2026-10-05"));
+  assert.equal(record.origin, "live");
+  assert.equal(record.days.length, 3);
+  const groups = await loadGroups(async () => new Response(JSON.stringify(["ИС2-241-ОБ", " ", "ИС2-251-ОБ"])));
+  assert.deepEqual(groups.groups, ["ИС2-241-ОБ", "ИС2-251-ОБ"]);
+  await assert.rejects(loadSchedule("ИС2-241-ОБ", "2026-09-21", 1, async () => new Response("<p>пусто</p>")), UpstreamError);
+  await assert.rejects(fetchUpstream("https://x.test/", async () => new Response("", { status: 503 })), (error) => error.code === "status");
+  await assert.rejects(
+    fetchUpstream("https://x.test/", (url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))), 50),
+    (error) => error.code === "timeout",
+  );
+  const failed = await cachedJson({}, "https://x.test/__edge/k", 60, async () => {
+    throw new UpstreamError("timeout", "slow");
+  });
+  assert.equal(failed.status, 504);
+  assert.equal((await failed.json()).error, "upstream_timeout");
+  const broken = await cachedJson({}, "https://x.test/__edge/k", 60, async () => {
+    throw new UpstreamError("status", "HTTP 500");
+  });
+  assert.equal(broken.status, 502);
+  const good = await cachedJson({}, "https://x.test/__edge/k", 60, async () => ({ ok: true, fetchedAt: new Date().toISOString(), days: [] }));
+  assert.equal(good.status, 200);
+  assert.match(good.headers.get("Content-Type"), /json/);
+}
 
 console.log("selfcheck ok");
