@@ -1,4 +1,4 @@
-const SHELL = "rasp-shell-v9";
+const SHELL = "rasp-shell-v10";
 const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
 const PROXY_TIMEOUT_MS = 10000;
@@ -40,6 +40,9 @@ const REQUIRED = [
 const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
 // Прокси расписания (functions/groups.js, functions/schedule.js): сеть с таймаутом, потом копия.
 const PROXY_PATHS = new Set(["./groups", "./schedule"].map((path) => new URL(path, self.location.href).pathname));
+// Зеркало на GitHub Pages берёт те же данные с Cloudflare Pages — их тоже держим офлайн.
+const PAGES_ORIGIN = "https://rasp-is2-241.pages.dev";
+const PAGES_PROXY_PATHS = new Set(["/groups", "/schedule"]);
 
 // Phones still on the network-first worker have HTML that waits on the network
 // before painting. Until the atomic shell update replaces that HTML, answer
@@ -106,7 +109,8 @@ async function materialize(response) {
 }
 
 function isProxyRequest(url) {
-  return PROXY_PATHS.has(url.pathname);
+  if (url.origin === self.location.origin) return PROXY_PATHS.has(url.pathname);
+  return url.origin === PAGES_ORIGIN && PAGES_PROXY_PATHS.has(url.pathname);
 }
 
 function isDataRequest(url) {
@@ -136,11 +140,11 @@ async function store(cache, key, response) {
   }
 }
 
-async function fetchBuffered(url, ms) {
+async function fetchBuffered(url, ms, init = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    const response = await fetch(url, { ...init, signal: controller.signal, cache: "no-store" });
     if (!response) return null;
     return await materialize(response);
   } finally {
@@ -257,7 +261,12 @@ async function dropOlderSchedules(cache, url) {
   try {
     for (const request of await cache.keys()) {
       const other = new URL(request.url);
-      if (other.pathname === url.pathname && other.searchParams.get("group") === group && other.href !== url.href) {
+      if (
+        other.origin === url.origin &&
+        other.pathname === url.pathname &&
+        other.searchParams.get("group") === group &&
+        other.href !== url.href
+      ) {
         await cache.delete(request);
       }
     }
@@ -381,16 +390,28 @@ function withFallback(response, reason) {
   return new Response(response.body, { status: 200, headers });
 }
 
+// В кэш идёт только настоящий ответ прокси: 200, JSON и не { ok: false }.
+async function isOkJson(response) {
+  if (!response || response.status !== 200 || !isJson(response)) return false;
+  try {
+    const data = await response.clone().json();
+    return Boolean(data) && typeof data === "object" && data.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
 async function proxyThenCache(request) {
   const cache = await caches.open(SHELL);
   const url = new URL(request.url);
+  const init = url.origin === self.location.origin ? {} : { mode: "cors", credentials: "omit" };
   let fresh = null;
   try {
-    fresh = await fetchBuffered(url.href, PROXY_TIMEOUT_MS);
+    fresh = await fetchBuffered(url.href, PROXY_TIMEOUT_MS, init);
   } catch {
     fresh = null;
   }
-  if (fresh && fresh.status === 200 && isJson(fresh)) {
+  if (await isOkJson(fresh)) {
     if (await store(cache, url.href, fresh.clone())) await dropOlderSchedules(cache, url);
     return fresh;
   }
@@ -404,11 +425,12 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
   if (API_PATHS.has(path)) return;
-  if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
+  if (event.request.method !== "GET") return;
   if (isProxyRequest(url)) {
     event.respondWith(proxyThenCache(event.request));
     return;
   }
+  if (url.origin !== self.location.origin) return;
   if (isDataRequest(url)) {
     event.respondWith(networkThenCache(event.request));
     return;

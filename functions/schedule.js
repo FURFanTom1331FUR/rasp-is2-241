@@ -1,12 +1,19 @@
-import { SCHEDULE_FRESH_S, cachedJson, isGroupCode, isIsoDate, json, loadSchedule, windowCount } from "./_kis.js";
+import { SCHEDULE_FRESH_S, cachedJson, isGroupCode, isIsoDate, json, loadSchedule, preflight, windowCount, withCors } from "./_kis.js";
 
 // GET /schedule?date=ГГГГ-ММ-ДД&group=КОД[&windows=1..3]
 // Одно окно — 14 дней начиная с date, как на kis.vgltu.ru. Ответ — уже разобранные дни.
 export async function onRequest(context) {
-  if (context.request.method !== "GET" && context.request.method !== "HEAD") {
+  const { request } = context;
+  if (request.method === "OPTIONS") return preflight(request);
+  return withCors(request, await handle(context));
+}
+
+async function handle(context) {
+  const { request } = context;
+  if (request.method !== "GET" && request.method !== "HEAD") {
     return json(405, { ok: false, error: "method_not_allowed" }, { Allow: "GET" });
   }
-  const url = new URL(context.request.url);
+  const url = new URL(request.url);
   const date = url.searchParams.get("date") || "";
   const group = (url.searchParams.get("group") || "").trim();
   const windows = windowCount(url.searchParams.get("windows"));

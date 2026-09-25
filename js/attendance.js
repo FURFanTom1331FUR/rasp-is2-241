@@ -1,4 +1,4 @@
-import { WORKER_URL } from "./config.js";
+import { PAGES_ORIGIN, WORKER_URL, isProxyHost } from "./config.js";
 import { fetchText } from "./net.js";
 
 const SESSION_KEY = "rasp.attendance.session";
@@ -76,8 +76,10 @@ export function configuredWorkerUrl() {
   const baked = normalizeWorkerUrl(bakedWorkerUrl());
   if (baked) return baked;
   const origin = globalThis.location?.origin;
-  if (origin && origin !== "null") return String(origin).replace(/\/$/, "");
-  return "";
+  if (!origin || origin === "null") return "";
+  // Зеркало (GitHub Pages) без functions/ — вход идёт через Cloudflare Pages.
+  if (!isProxyHost(globalThis.location?.hostname)) return PAGES_ORIGIN;
+  return String(origin).replace(/\/$/, "");
 }
 
 export function saveWorkerUrl(value) {

@@ -16,6 +16,43 @@ export const SCHEDULE_FRESH_S = 45 * 60;
 export const GROUPS_FRESH_S = 24 * 60 * 60;
 const KEEP_S = 7 * 24 * 60 * 60;
 
+// CORS: зеркало на GitHub Pages и превью Cloudflare ходят сюда с другого домена.
+// Заголовок ставится на каждый ответ заново — копия на краю хранится без него.
+const CORS_EXACT = new Set(["https://rasp-is2-241.pages.dev", "https://furfantom1331fur.github.io"]);
+const CORS_PREVIEW_RE = /^https:\/\/[a-z0-9-]+\.rasp-is2-241\.pages\.dev$/;
+
+export function allowedOrigin(origin) {
+  const value = String(origin || "").toLowerCase();
+  if (!value) return "";
+  return CORS_EXACT.has(value) || CORS_PREVIEW_RE.test(value) ? value : "";
+}
+
+function corsHeaders(request) {
+  const origin = allowedOrigin(request?.headers?.get?.("Origin"));
+  const headers = { Vary: "Origin" };
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Methods"] = "GET";
+    headers["Access-Control-Expose-Headers"] = "X-Rasp-Edge";
+  }
+  return headers;
+}
+
+export function withCors(request, response) {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(corsHeaders(request))) headers.set(name, value);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+export function preflight(request) {
+  const headers = corsHeaders(request);
+  if (headers["Access-Control-Allow-Origin"]) {
+    headers["Access-Control-Allow-Headers"] = "Accept";
+    headers["Access-Control-Max-Age"] = "86400";
+  }
+  return new Response(null, { status: 204, headers: { ...headers, Allow: "GET, HEAD, OPTIONS" } });
+}
+
 export class UpstreamError extends Error {
   constructor(code, message) {
     super(message);
