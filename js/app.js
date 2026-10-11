@@ -66,6 +66,8 @@ import {
   searchTeachers,
   toggleFavorite,
 } from "./teachers.js";
+import { PAIRS, buildingLabel, loadRoomsCache, pairAt, pairById, saveRoomsCache, sortBuildings, splitRooms } from "./rooms.js";
+import { canvasBlob, drawShareImage, shareFileName } from "./share.js";
 
 // Прокси (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
 // На pages.dev — тот же домен, с зеркала GitHub Pages — https://rasp-is2-241.pages.dev.
@@ -73,6 +75,9 @@ const API_BASE = apiBase();
 const LIVE_SCHEDULE = `${API_BASE}schedule`;
 const LIVE_GROUPS = `${API_BASE}groups`;
 const LIVE_TEACHERS = `${API_BASE}teachers`;
+const LIVE_ROOMS = `${API_BASE}rooms`;
+const ROOMS_BUILDING_KEY = "rasp.roomsBuilding";
+const ROOMS_LIST_KEY = "rasp.roomsBuildings";
 const TEACHERS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEACHER_FRESH_MS = 45 * 60 * 1000;
 const LIVE_WINDOWS = 2;
@@ -130,6 +135,28 @@ const state = {
     query: "",
     picking: false,
     week: "",
+  },
+  rooms: {
+    buildings: null,
+    building: "",
+    date: "",
+    pair: 1,
+    loading: false,
+    done: 0,
+    total: 0,
+    entries: [],
+    fetchedAt: "",
+    issue: "",
+    open: "",
+  },
+  share: {
+    open: false,
+    source: "group",
+    range: "today",
+    url: "",
+    file: null,
+    note: "",
+    busy: false,
   },
   attendance: {
     error: "",
@@ -465,7 +492,7 @@ function dateHero(iso) {
     title = `<h1 class="hero-date hero-range">Неделя прошла</h1>`;
     sub = `<p class="weekday">Дни до сегодняшнего по Москве не показываем</p>`;
   }
-  return `<div class="hero">${kicker}${title}${sub}${back}</div>`;
+  return `<div class="hero">${kicker}${title}${sub}<div class="hero-actions">${back}<button type="button" class="text-btn share-link" data-action="share-open" data-source="group">Поделиться картинкой</button></div></div>`;
 }
 
 // «Фамилия И.О.» — ссылка на расписание преподавателя; «Вакансия…» и прочее — просто текст.
@@ -784,6 +811,11 @@ function moreView() {
   const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
+    <article class="block tool-block">
+      <h2>Свободные аудитории</h2>
+      <p>Какие аудитории корпуса свободны на нужной паре — по официальному расписанию ВГЛТУ.</p>
+      <button class="primary" type="button" data-action="mode" data-mode="rooms">Найти свободную аудиторию</button>
+    </article>
     ${versionBlock()}
     <article class="block">
       <h2>Напоминание</h2>
@@ -854,6 +886,7 @@ function navSection() {
   if (state.mode === "more") return "more";
   if (state.mode === "attendance") return "attendance";
   if (state.mode === "teachers") return "teachers";
+  if (state.mode === "rooms") return "more";
   return "schedule";
 }
 
@@ -1164,6 +1197,7 @@ function teacherView() {
       <div class="teacher-actions">
         <button type="button" class="text-btn" data-action="teacher-fav" aria-pressed="${favorite ? "true" : "false"}">${favorite ? "★ В избранном" : "☆ В избранное"}</button>
         <button type="button" class="text-btn" data-action="teacher-change">Сменить</button>
+        <button type="button" class="text-btn share-link icon-only" data-action="share-open" data-source="teacher" aria-label="Поделиться картинкой" title="Поделиться картинкой"></button>
       </div>
     </div>
     <div class="date-card teacher-week-nav">
@@ -1183,6 +1217,347 @@ function teacherView() {
     </section>`;
 }
 
+// ===== Свободные аудитории =====
+
+function roomsDefaults() {
+  const r = state.rooms;
+  if (r.date) return;
+  const hhmm = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
+  let date = moscowIso();
+  let pair = pairAt(hhmm);
+  if (!pair) {
+    date = addDays(date, 1);
+    pair = 1;
+  }
+  if (weekdayName(date) === "воскресенье") {
+    date = addDays(date, 1);
+    pair = 1;
+  }
+  r.date = date;
+  r.pair = pair;
+  r.building = r.building || localStorage.getItem(ROOMS_BUILDING_KEY) || "Гл";
+}
+
+async function loadBuildings() {
+  const r = state.rooms;
+  if (!r.buildings) {
+    try {
+      r.buildings = JSON.parse(localStorage.getItem(ROOMS_LIST_KEY) || "null");
+    } catch {
+      r.buildings = null;
+    }
+  }
+  if (r.buildings && Object.keys(r.buildings).length) return;
+  try {
+    const response = await fetchText(LIVE_ROOMS, {}, 30000);
+    const data = JSON.parse(response.text);
+    if (response.ok && data?.buildings) {
+      r.buildings = data.buildings;
+      localStorage.setItem(ROOMS_LIST_KEY, JSON.stringify(data.buildings));
+    } else r.issue = data?.message || "Сайт ВГЛТУ не отдал список аудиторий.";
+  } catch {
+    r.issue = "Нет связи с сервером — список аудиторий не загрузился.";
+  }
+}
+
+let roomsToken = 0;
+
+async function loadRooms(force = false) {
+  const r = state.rooms;
+  const token = ++roomsToken;
+  const { building, date } = r;
+  const cached = loadRoomsCache(building, date);
+  r.entries = cached?.rooms || [];
+  r.fetchedAt = cached?.fetchedAt || "";
+  r.total = cached?.total || r.entries.length;
+  r.done = r.entries.length;
+  r.issue = "";
+  r.open = "";
+  const fresh = cached && cached.complete && Date.now() - (Date.parse(cached.savedAt || "") || 0) < 60 * 60 * 1000;
+  if ((fresh && !force) || !navigator.onLine) {
+    if (!navigator.onLine) r.issue = cached ? "offline" : "Нет сети, а сохранённой копии для этого дня и корпуса нет.";
+    if (state.mode === "rooms") render();
+    return;
+  }
+  r.loading = true;
+  if (state.mode === "rooms") render();
+  const collected = [];
+  let parts = 1;
+  let total = 0;
+  let fetchedAt = "";
+  let failedParts = 0;
+  for (let part = 0; part < parts; part += 1) {
+    const url = `${LIVE_ROOMS}?building=${encodeURIComponent(building)}&date=${date}&part=${part}`;
+    try {
+      const response = await fetchText(url, {}, 75000);
+      const data = JSON.parse(response.text);
+      if (!response.ok || !data?.ok) throw new Error(data?.message || "bad");
+      parts = data.parts;
+      total = data.total;
+      fetchedAt = fetchedAt && fetchedAt < data.fetchedAt ? fetchedAt : data.fetchedAt;
+      collected.push(...data.rooms);
+    } catch {
+      failedParts += 1;
+      if (part === 0) break;
+    }
+    if (token !== roomsToken) return;
+    r.entries = collected.length ? [...collected] : r.entries;
+    r.done = collected.length;
+    r.total = total || r.total;
+    if (state.mode === "rooms") render();
+  }
+  if (token !== roomsToken) return;
+  r.loading = false;
+  if (!collected.length) {
+    r.issue = cached ? "upstream" : "Сайт ВГЛТУ не отдал расписание аудиторий. Попробуйте чуть позже.";
+  } else {
+    r.fetchedAt = fetchedAt;
+    if (failedParts) r.issue = "partial";
+    saveRoomsCache(building, date, { rooms: collected, total, fetchedAt, savedAt: new Date().toISOString(), complete: !failedParts });
+  }
+  if (state.mode === "rooms") render();
+}
+
+function openRooms() {
+  roomsDefaults();
+  state.mode = "rooms";
+  render();
+  window.scrollTo?.(0, 0);
+  loadBuildings().then(() => {
+    const keys = Object.keys(state.rooms.buildings || {});
+    if (keys.length && !keys.includes(state.rooms.building)) state.rooms.building = sortBuildings(keys)[0];
+    render();
+    loadRooms();
+  });
+}
+
+function roomsStatus() {
+  const r = state.rooms;
+  if (r.loading) return `Проверяем аудитории: ${r.done} из ${r.total || "…"}. Первый раз за день это может занять до минуты.`;
+  const stamp = r.fetchedAt ? formatStamp(r.fetchedAt) : "";
+  if (r.issue === "offline") return `Нет сети — показана копия от ${stamp}.`;
+  if (r.issue === "upstream") return `Сайт ВГЛТУ не ответил — показана копия от ${stamp}.`;
+  if (r.issue === "partial") return `Часть аудиторий не загрузилась. Данные расписания от ${stamp}.`;
+  if (r.issue) return r.issue;
+  return stamp ? `Расписание аудиторий от ${stamp}.` : "";
+}
+
+function roomRow(item, kind) {
+  let hint = "";
+  if (kind === "free") hint = item.until ? `свободна до ${item.until}` : "свободна до конца дня";
+  else if (kind === "busy") {
+    const lesson = item.busy;
+    const who = [(lesson.groups || []).join(", "), lesson.teacher].filter(Boolean).join(" · ");
+    hint = `занята до ${item.until}: ${lesson.type ? `${lesson.type}. ` : ""}${lesson.subject}${who ? ` (${who})` : ""}`;
+  } else hint = "нет данных";
+  return `<li><button type="button" class="room-row ${kind}" data-action="room-open" data-room="${esc(item.room)}">
+    <span class="room-name">${esc(item.room)}</span><span class="room-hint">${esc(hint)}</span></button></li>`;
+}
+
+function roomsView() {
+  const r = state.rooms;
+  roomsDefaults();
+  const keys = sortBuildings(Object.keys(r.buildings || {}));
+  const pair = pairById(r.pair);
+  const { free, busy, unknown } = splitRooms(r.entries, pair[1], pair[2]);
+  const buildings = keys.length
+    ? `<div class="chip-scroll">${keys
+        .map((key) => `<button type="button" data-action="rooms-building" data-building="${esc(key)}" aria-pressed="${key === r.building ? "true" : "false"}">${esc(buildingLabel(key))}<small>${r.buildings[key].length}</small></button>`)
+        .join("")}</div>`
+    : `<p class="status">${esc(r.issue || "Загружаем список корпусов…")}</p>`;
+  const pairs = `<div class="chip-scroll pairs">${PAIRS.map(([id, start]) => `<button type="button" data-action="rooms-pair" data-pair="${id}" aria-pressed="${id === r.pair ? "true" : "false"}">${id} пара<small>${start}</small></button>`).join("")}</div>`;
+  const today = moscowIso();
+  const dayKind = r.date === today ? "Сегодня" : r.date === addDays(today, 1) ? "Завтра" : weekdayName(r.date);
+  let lists = "";
+  if (r.entries.length) {
+    lists = `<h2 class="rooms-head">Свободны · ${free.length}</h2>
+      ${free.length ? `<ul class="room-list">${free.map((item) => roomRow(item, "free")).join("")}</ul>` : `<div class="empty"><p>На этой паре все проверенные аудитории заняты.</p></div>`}
+      ${busy.length ? `<details class="room-busy"><summary>Заняты · ${busy.length}</summary><ul class="room-list">${busy.map((item) => roomRow(item, "busy")).join("")}</ul></details>` : ""}
+      ${unknown.length ? `<details class="room-busy"><summary>Нет данных · ${unknown.length}</summary><ul class="room-list">${unknown.map((item) => roomRow(item, "unknown")).join("")}</ul></details>` : ""}`;
+  } else if (r.loading) lists = `<div class="card skeleton"></div><div class="card skeleton"></div>`;
+  return `<section class="more rooms-screen">
+    <h1>Свободные аудитории</h1>
+    <p class="rooms-note">По официальному расписанию ВГЛТУ (kis.vgltu.ru). Аудитория может быть закрыта или занята мероприятием вне расписания.</p>
+    ${buildings}
+    <div class="date-card rooms-date">
+      <div class="date-card-head">
+        <button class="shift" type="button" data-action="rooms-day" data-delta="-1" aria-label="Предыдущий день">‹</button>
+        <div><p>${esc(dayKind)}</p><strong>${esc(formatDots(r.date))}</strong></div>
+        <button class="shift" type="button" data-action="rooms-day" data-delta="1" aria-label="Следующий день">›</button>
+      </div>
+    </div>
+    ${pairs}
+    <p class="rooms-pair-time">${pair[0]} пара: ${pair[1]}–${pair[2]} · ${esc(buildingLabel(r.building))}</p>
+    ${r.loading ? `<div class="progress inline" aria-hidden="true"></div>` : ""}
+    ${lists}
+    <div class="status-row">
+      <p class="status" role="status">${esc(roomsStatus())}</p>
+      <button class="text-btn" type="button" data-action="rooms-refresh">Обновить</button>
+    </div>
+  </section>`;
+}
+
+function roomSheetHtml() {
+  const r = state.rooms;
+  const entry = r.entries.find((item) => item.room === r.open);
+  const lessons = entry?.ok ? [...entry.lessons].sort((a, b) => a.start.localeCompare(b.start)) : null;
+  const body = !lessons
+    ? `<p class="status">Для этой аудитории нет данных — сайт ВГЛТУ её не отдал.</p>`
+    : !lessons.length
+      ? `<div class="empty"><p class="empty-title">Нет пар</p><p>По расписанию аудитория свободна весь день.</p></div>`
+      : lessons
+          .map((lesson) => {
+            const meta = [(lesson.groups || []).join(", "), lesson.teacher].filter(Boolean).join(" · ");
+            return `<article class="card ${esc(lesson.type || "none")}">
+              <div class="card-top"><p class="time">${esc(lesson.start)}<span class="time-sep">–</span>${esc(lesson.end)}</p>
+              <div class="chips">${lesson.type ? `<span class="chip ${esc(lesson.type)}">${esc(lesson.type)}</span>` : ""}</div></div>
+              <h2 class="subject">${esc(lesson.subject)}</h2>${meta ? `<p class="meta-line">${esc(meta)}</p>` : ""}</article>`;
+          })
+          .join("");
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="room-title">
+    <div class="sheet-card">
+      <div class="grabber"></div>
+      <h2 id="room-title">${esc(r.open)}</h2>
+      <p class="lead">${esc(weekdayName(r.date))}, ${esc(formatDots(r.date))} · ${esc(buildingLabel(r.building))}</p>
+      <div class="room-day">${body}</div>
+      <p class="rooms-note">По официальному расписанию; мероприятия вне расписания здесь не видны.</p>
+      <a class="ghost link-ghost" href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(r.open)}" target="_blank" rel="noopener">Аудитория на карте ВГЛТУ</a>
+      <button class="primary" type="button" data-action="room-close">Закрыть</button>
+    </div>
+  </div>`;
+}
+
+// ===== Картинка «Поделиться» =====
+
+function shareDays(range, source) {
+  const today = moscowIso();
+  if (range === "today") return [today];
+  if (range === "tomorrow") return [addDays(today, 1)];
+  let monday = source === "teacher" ? state.teacher.week || mondayOf(today) : mondayOf(today);
+  if (source !== "teacher" && weekdayName(today) === "воскресенье") monday = addDays(monday, 7);
+  return Array.from({ length: 6 }, (_, index) => addDays(monday, index));
+}
+
+function shareModel(source, range) {
+  const isTeacher = source === "teacher";
+  const isos = shareDays(range, source);
+  const find = (iso) => (isTeacher ? teacherDay(iso) : dayByDate(iso));
+  const days = isos.map((iso) => {
+    const day = find(iso);
+    const label = `${weekdayName(iso)}, ${formatDots(iso)}`;
+    if (!day) return { label, lessons: null };
+    const lessons = (isTeacher ? day.lessons : day.lessons.filter((lesson) => lessonMatchesSubgroup(lesson, state.subgroup))).map((lesson) => ({
+      start: lesson.start,
+      end: lesson.end,
+      type: lesson.type,
+      subject: lesson.subject,
+      badge: subgroupBadgeLabel(lessonSubgroup(lesson)),
+      meta: (isTeacher ? [(lesson.groups || []).join(", "), lesson.room] : [lesson.room, lesson.teacher]).filter(Boolean).join(" · "),
+    }));
+    return { label, lessons };
+  });
+  // Неделя: пустую субботу без данных не рисуем.
+  const trimmed = range === "week" ? days.filter((day, index) => index < 5 || day.lessons?.length) : days;
+  const rangeLabel = range === "week" ? `${formatDots(isos[0])} – ${formatDots(isos[isos.length - 1])}` : range === "today" ? `Сегодня, ${formatDots(isos[0])}` : `Завтра, ${formatDots(isos[0])}`;
+  const sub = !isTeacher && state.subgroup !== "all" ? ` · ${state.subgroup} подгруппа` : "";
+  const record = isTeacher ? state.teacher.record : state.record;
+  return {
+    kicker: isTeacher ? "Преподаватель · ВГЛТУ" : "Группа · ВГЛТУ",
+    title: isTeacher ? state.teacher.name : state.group,
+    subtitle: `${rangeLabel}${sub}`,
+    days: trimmed,
+    footer: "Пары · rasp-is2-241.pages.dev",
+    stamp: record?.fetchedAt ? `Расписание ВГЛТУ от ${formatStamp(record.fetchedAt)}` : "",
+    fileRange: range === "week" ? `${isos[0]}_${isos[isos.length - 1]}` : isos[0],
+  };
+}
+
+async function buildShare() {
+  const sh = state.share;
+  sh.busy = true;
+  sh.note = "";
+  try {
+    const model = shareModel(sh.source, sh.range);
+    const canvas = drawShareImage(model);
+    const blob = await canvasBlob(canvas);
+    if (sh.url) URL.revokeObjectURL(sh.url);
+    sh.url = URL.createObjectURL(blob);
+    sh.file = new File([blob], shareFileName(model.title, model.fileRange), { type: "image/png" });
+  } catch {
+    sh.note = "Не получилось нарисовать картинку.";
+  }
+  sh.busy = false;
+  if (sh.open) render();
+}
+
+function canShareFile(file) {
+  try {
+    return Boolean(file && navigator.canShare && navigator.share && navigator.canShare({ files: [file] }));
+  } catch {
+    return false;
+  }
+}
+
+function shareSheetHtml() {
+  const sh = state.share;
+  const ranges = [
+    ["today", "Сегодня"],
+    ["tomorrow", "Завтра"],
+    ["week", "Неделя"],
+  ];
+  const native = canShareFile(sh.file);
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="share-title">
+    <div class="sheet-card share-card">
+      <div class="grabber"></div>
+      <h2 id="share-title">Поделиться картинкой</h2>
+      <div class="seg">${ranges.map(([value, label]) => `<button type="button" data-action="share-range" data-range="${value}" aria-pressed="${sh.range === value ? "true" : "false"}">${label}</button>`).join("")}</div>
+      <div class="share-preview">${sh.url ? `<img src="${esc(sh.url)}" alt="Картинка с расписанием" />` : `<div class="card skeleton"></div>`}</div>
+      ${sh.note ? `<p class="status" role="status">${esc(sh.note)}</p>` : ""}
+      ${native ? `<button class="primary" type="button" data-action="share-send">Поделиться</button>` : ""}
+      <button class="${native ? "ghost" : "primary"}" type="button" data-action="share-download">Сохранить картинку</button>
+      ${native ? "" : `<p class="rooms-note">Этот браузер не умеет отправлять картинки напрямую — сохраните её и отправьте из галереи.</p>`}
+      <button class="ghost" type="button" data-action="share-close">Закрыть</button>
+    </div>
+  </div>`;
+}
+
+function openShare(source) {
+  const sh = state.share;
+  sh.open = true;
+  sh.source = source === "teacher" ? "teacher" : "group";
+  sh.range = state.mode === "week" ? "week" : state.mode === "tomorrow" ? "tomorrow" : source === "teacher" ? "week" : "today";
+  sh.url = "";
+  sh.file = null;
+  render();
+  buildShare();
+}
+
+async function sendShare() {
+  const sh = state.share;
+  if (!sh.file) return;
+  try {
+    await navigator.share({ files: [sh.file], title: "Расписание", text: "Расписание пар ВГЛТУ" });
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      sh.note = "Не удалось поделиться — сохраните картинку.";
+      render();
+    }
+  }
+}
+
+function downloadShare() {
+  const sh = state.share;
+  if (!sh.url || !sh.file) return;
+  const link = document.createElement("a");
+  link.href = sh.url;
+  link.download = sh.file.name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  sh.note = `Картинка сохранена: ${sh.file.name}`;
+  render();
+}
+
 function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
@@ -1190,6 +1565,8 @@ function render() {
     ? attendanceView()
     : state.mode === "teachers"
       ? teacherView()
+      : state.mode === "rooms"
+        ? roomsView()
     : state.mode === "more"
       ? moreView()
       : !state.group
@@ -1209,7 +1586,9 @@ function render() {
     <main>${main}</main>
     ${nav()}
     ${updateBanner()}
-    ${state.pickerOpen ? pickerHtml() : ""}`;
+    ${state.pickerOpen ? pickerHtml() : ""}
+    ${state.rooms.open && state.mode === "rooms" ? roomSheetHtml() : ""}
+    ${state.share.open ? shareSheetHtml() : ""}`;
 }
 
 function ensure(iso) {
@@ -1321,6 +1700,8 @@ app.addEventListener("click", (event) => {
       state.mode = "week";
       render();
       ensureWeek();
+    } else if (mode === "rooms") {
+      openRooms();
     } else if (mode === "teachers") {
       if (state.mode === "teachers" && state.teacher.name && !state.teacher.picking) {
         state.teacher.picking = true;
@@ -1339,6 +1720,35 @@ app.addEventListener("click", (event) => {
       render();
     }
   } else if (action === "pick-teacher" || action === "open-teacher") openTeacher(button.dataset.teacher);
+  else if (action === "rooms-building") {
+    state.rooms.building = button.dataset.building;
+    localStorage.setItem(ROOMS_BUILDING_KEY, state.rooms.building);
+    loadRooms();
+  } else if (action === "rooms-pair") {
+    state.rooms.pair = Number(button.dataset.pair);
+    render();
+  } else if (action === "rooms-day") {
+    state.rooms.date = addDays(state.rooms.date, Number(button.dataset.delta));
+    loadRooms();
+  } else if (action === "rooms-refresh") loadRooms(true);
+  else if (action === "room-open") {
+    state.rooms.open = button.dataset.room;
+    render();
+  } else if (action === "room-close") {
+    state.rooms.open = "";
+    render();
+  } else if (action === "share-open") openShare(button.dataset.source);
+  else if (action === "share-range") {
+    state.share.range = button.dataset.range;
+    state.share.url = "";
+    render();
+    buildShare();
+  } else if (action === "share-send") sendShare();
+  else if (action === "share-download") downloadShare();
+  else if (action === "share-close") {
+    state.share.open = false;
+    render();
+  }
   else if (action === "teacher-fav") {
     if (state.teacher.name) toggleFavorite(state.teacher.name);
     render();

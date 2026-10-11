@@ -488,3 +488,54 @@ console.log("selfcheck timeouts ok");
   assert.equal(teachers.teachers.length, 60);
 }
 console.log("selfcheck teachers ok");
+
+// Свободные аудитории (v16).
+{
+  const { buildingOf, groupRooms, mondayIso, loadRoomPart, sliceDay, handleRooms } = await import("../functions/_rooms.js");
+  const { occupancy, splitRooms, pairAt, buildingLabel, sortBuildings } = await import("../js/rooms.js");
+  assert.equal(buildingOf("207Пр/АПП"), "АПП");
+  assert.equal(buildingOf("113Ин.яз./9к"), "9к");
+  assert.equal(buildingOf("110Л/11к комп"), "11к");
+  assert.equal(buildingOf("1/10кор"), "10к");
+  assert.equal(buildingOf("актовый зал"), "");
+  assert.deepEqual(Object.keys(groupRooms(["1/Гл", "2/Гл", "3/Гл", "1/7к"])), ["Гл"]);
+  assert.equal(mondayIso("2026-10-18"), "2026-10-12");
+  assert.equal(mondayIso("2026-10-12"), "2026-10-12");
+  assert.equal(pairAt("08:00"), 1);
+  assert.equal(pairAt("13:30"), 4);
+  assert.equal(pairAt("20:30"), 8);
+  assert.equal(pairAt("22:00"), null);
+  assert.equal(buildingLabel("7к"), "Корпус 7");
+  assert.deepEqual(sortBuildings(["АПП", "10к", "Гл", "7к"]), ["Гл", "7к", "10к", "АПП"]);
+  const L = [{ start: "08:30", end: "10:00" }, { start: "10:10", end: "11:40" }, { start: "15:20", end: "16:50" }];
+  assert.deepEqual(occupancy(L, "08:30", "10:00").until, "11:40");
+  assert.deepEqual(occupancy(L, "11:50", "13:20"), { busy: null, until: "15:20" });
+  assert.deepEqual(occupancy(L, "17:00", "18:30"), { busy: null, until: "" });
+  const split = splitRooms([{ room: "1", ok: true, lessons: [] }, { room: "2", ok: true, lessons: L }, { room: "3", ok: false }], "08:30", "10:00");
+  assert.deepEqual([split.free.length, split.busy.length, split.unknown.length], [1, 1, 1]);
+  const html = '<div><strong>12 октября 2026</strong></div><table><tr><td style="width:75px">08:30-10:00</td><td style="width:auto">пр. Охрана труда<br/><br />ОП1-232-ОТ<br/><br /><a href="x">207Пр/АПП</a><br />Коваленко С.Д.</td></tr></table>';
+  let calls = 0;
+  const fake = async (url) => { calls += 1; if (String(url).includes("bad")) throw new Error("down"); return new Response(html); };
+  const part = await loadRoomPart(["207Пр/АПП", "bad/АПП"], "2026-10-12", fake);
+  assert.equal(part.failed, 1);
+  assert.equal(calls, 3);
+  const day = sliceDay(part, "2026-10-12");
+  assert.equal(day[0].lessons[0].subject, "Охрана труда");
+  assert.equal(day[1].ok, false);
+  // Корпус и части через handleRooms (без края Cloudflare).
+  const rooms = Array.from({ length: 70 }, (_, i) => `${i + 1}/Гл`);
+  const list = async (url) => (String(url).includes("list?type=Auditory") ? new Response(JSON.stringify(rooms)) : new Response(html));
+  const head = await (await handleRooms({ request: new Request("https://x/rooms") }, list)).json();
+  assert.equal(head.buildings["Гл"].length, 70);
+  const res = await (await handleRooms({ request: new Request("https://x/rooms?building=%D0%93%D0%BB&date=2026-10-12&part=4") }, list)).json();
+  assert.equal(res.parts, 5);
+  assert.equal(res.rooms.length, 6);
+  const bad = await handleRooms({ request: new Request("https://x/rooms?building=%D0%93%D0%BB&date=2026-10-12&part=9") }, list);
+  assert.equal(bad.status, 400);
+}
+{
+  const { shareFileName } = await import("../js/share.js");
+  assert.equal(shareFileName("ИС2-241-ОБ", "2026-10-12"), "pary-ИС2-241-ОБ-2026-10-12.png");
+  assert.equal(shareFileName("Гонца А.С.", "2026-10-12_2026-10-17"), "pary-Гонца_А.С.-2026-10-12_2026-10-17.png");
+}
+console.log("selfcheck rooms ok");

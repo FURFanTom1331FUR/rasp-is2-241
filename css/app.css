@@ -836,3 +836,85 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .teacher-week-nav > .text-btn { margin-top: 8px; }
 .teacher-week { padding: 0 16px; }
 .teacher-week .past-day { opacity: 0.62; }
+
+/* Свободные аудитории и «Поделиться картинкой» (v16) */
+.tool-block .primary { margin-top: 4px; }
+.rooms-screen h1 { margin-bottom: 4px; }
+.rooms-note { margin: 0 0 12px; color: var(--muted); font-size: 0.85rem; line-height: 1.4; }
+.chip-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin: 8px -16px 4px;
+  padding: 2px 16px 8px;
+  scrollbar-width: none;
+}
+.chip-scroll::-webkit-scrollbar { display: none; }
+.chip-scroll button {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 48px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font: inherit;
+  font-weight: 750;
+  font-size: 0.9rem;
+}
+.chip-scroll button small { color: var(--muted); font-size: 0.72rem; font-weight: 650; }
+.chip-scroll button[aria-pressed="true"] { background: var(--accent); color: #f7fff9; }
+.chip-scroll button[aria-pressed="true"] small { color: #d7efe0; }
+.rooms-date { margin: 6px 0 4px; }
+.rooms-pair-time { margin: 2px 2px 10px; color: var(--muted); font-weight: 700; font-size: 0.9rem; }
+.progress.inline { position: static; margin: 0 0 10px; }
+.rooms-head { margin: 8px 2px 8px; font-size: 1.05rem; letter-spacing: -0.02em; }
+.room-list { list-style: none; margin: 0; padding: 0; }
+.room-row {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px;
+  padding: 12px 14px;
+  border: 0;
+  border-left: 5px solid var(--accent);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font: inherit;
+  text-align: left;
+}
+.room-row.busy { border-left-color: var(--prac); }
+.room-row.unknown { border-left-color: var(--muted); }
+.room-name { flex: none; font-weight: 800; }
+.room-hint { color: var(--muted); font-size: 0.85rem; text-align: right; }
+.room-row.busy { flex-direction: column; align-items: flex-start; gap: 2px; }
+.room-row.busy .room-hint { text-align: left; }
+.room-busy { margin: 10px 0; }
+.room-busy summary { padding: 10px 2px; font-weight: 800; cursor: pointer; }
+.room-day { max-height: 52vh; overflow-y: auto; margin: 0 0 8px; }
+.link-ghost { display: flex; align-items: center; justify-content: center; text-decoration: none; }
+.share-btn { margin-top: 6px; }
+.share-card { max-height: 92vh; overflow-y: auto; }
+.share-preview { margin: 10px 0; text-align: center; }
+.share-preview img {
+  width: 100%;
+  max-height: 46vh;
+  object-fit: contain;
+  object-position: top;
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  background: var(--bg);
+}
+.hero-actions { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin-top: 4px; }
+.hero-actions .text-btn { width: auto; }
+.share-link::before { content: "↗ "; }
+.share-link.icon-only::before { content: "↗"; font-size: 1.1rem; }
+.share-link.icon-only { min-width: 48px; justify-content: center; }

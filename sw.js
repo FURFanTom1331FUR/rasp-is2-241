@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v15";
+const SHELL = "rasp-shell-v16";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.
@@ -21,6 +21,8 @@ const FILES = [
   "./js/net.js",
   "./js/version.js",
   "./js/teachers.js",
+  "./js/rooms.js",
+  "./js/share.js",
   "./js/app.js",
   "./version.json",
   "./manifest.webmanifest",
@@ -46,9 +48,12 @@ const REQUIRED = [
   "./js/config.js",
   "./js/version.js",
   "./js/teachers.js",
+  "./js/rooms.js",
+  "./js/share.js",
 ];
 
-const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
+// /rooms — долгие ответы (сбор по корпусу), копию держит само приложение в localStorage.
+const API_PATHS = new Set(["/login", "/attendance", "/logout", "/rooms"]);
 // Прокси расписания (functions/groups.js, functions/schedule.js): сеть с таймаутом, потом копия.
 const PROXY_PATHS = new Set(["./groups", "./schedule", "./teachers"].map((path) => new URL(path, self.location.href).pathname));
 // Зеркало на GitHub Pages берёт те же данные с Cloudflare Pages — их тоже держим офлайн.
