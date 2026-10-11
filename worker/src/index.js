@@ -245,6 +245,19 @@ export async function performLogout(token, fetchImpl = fetch) {
   });
 }
 
+// Ссылка-сброс: https://rasp-is2-241.pages.dev/logout. Любой старый service worker
+// пропускает /logout в сеть, поэтому страница откроется даже из «застрявшей» версии.
+const RESET_PAGE = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Пары — сброс</title>
+<style>body{font-family:system-ui,sans-serif;margin:2rem;line-height:1.5}</style></head><body>
+<h1>Сбрасываем приложение…</h1><p id="s">Удаляем старую версию и кэш. Выбранная группа сохранится.</p>
+<script>(async function(){
+  try { var regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(function(r){ return r.unregister(); })); } catch (e) {}
+  try { var keys = await caches.keys(); await Promise.all(keys.map(function(k){ return caches.delete(k); })); } catch (e) {}
+  ["rasp.workerUrl","rasp.attendance.session","rasp.attendance.snapshot"].forEach(function(k){ try { localStorage.removeItem(k); } catch (e) {} });
+  document.getElementById("s").textContent = "Готово. Открываем свежую версию…";
+  setTimeout(function(){ location.replace("/?reset=" + Date.now()); }, 800);
+})();</script></body></html>`;
+
 function routeOf(request) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
@@ -286,6 +299,12 @@ export default {
         return json(request, result.status, result.ok
           ? { ok: true, format: result.format, data: result.data, name: result.name || "" }
           : { ok: false, error: result.error });
+      }
+      if (request.method === "GET" && path === "/logout") {
+        return new Response(RESET_PAGE, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        });
       }
       if (request.method === "POST" && path === "/logout") {
         await performLogout(request.headers.get("X-Vgltu-Session") || "", upstream);

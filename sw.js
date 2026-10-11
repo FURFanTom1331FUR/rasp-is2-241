@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v13";
+const SHELL = "rasp-shell-v14";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.
@@ -7,7 +7,7 @@ const UPDATER_SINCE = 11;
 const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
 const PROXY_TIMEOUT_MS = 10000;
-const UPDATE_TIMEOUT_MS = 15000;
+const UPDATE_TIMEOUT_MS = 30000;
 
 const FILES = [
   "./",
@@ -212,13 +212,20 @@ async function hasDocument(cache) {
   return null;
 }
 
-function loadFresh(fresh, path) {
+// На медленной сети (или когда провайдер душит Cloudflare) файл может не скачаться с первого раза.
+async function loadFresh(fresh, path) {
   const url = new URL(path, self.location.href).href;
-  return fetchBuffered(url, UPDATE_TIMEOUT_MS)
-    .then((response) => {
-      if (response && response.status === 200) fresh.set(path, response);
-    })
-    .catch(() => {});
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetchBuffered(url, UPDATE_TIMEOUT_MS);
+      if (response && response.status === 200) {
+        fresh.set(path, response);
+        return;
+      }
+    } catch {
+      /* ещё раз */
+    }
+  }
 }
 
 async function storeFresh(cache, path, response) {
@@ -326,7 +333,10 @@ self.addEventListener("install", (event) => {
       // браузер попробует снова при следующей проверке.
       if (!ready && (updating || !(await hasDocument(cache)))) throw new Error("fresh shell not cached");
       await copyPreviousEntries(cache);
-      if (!updating || legacy) await self.skipWaiting();
+      // С v14 новая версия включается сразу: раньше она ждала кнопку «Обновить», и телефоны
+      // неделями сидели на старом коде. Страница сама перезагрузится по controllerchange.
+      void legacy;
+      await self.skipWaiting();
     })(),
   );
 });

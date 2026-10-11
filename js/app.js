@@ -872,6 +872,8 @@ function versionBlock() {
       <button class="ghost" type="button" data-action="check-update" ${update.checking ? "disabled" : ""}>Проверить обновления</button>
       ${newer ? `<button class="primary" type="button" data-action="apply-update">Обновить до версии ${update.available.version}</button>` : ""}
       ${note ? `<p class="status" role="status">${esc(note)}</p>` : ""}
+      <p>Если приложение ведёт себя как старая версия — сбросьте его: кэш и вход в кабинет сотрутся, расписание скачается заново.</p>
+      <button class="ghost" type="button" data-action="reset-app">Сбросить приложение</button>
     </article>`;
 }
 
@@ -1072,6 +1074,7 @@ app.addEventListener("click", (event) => {
     state.update.justUpdated = false;
     render();
   } else if (action === "check-update") checkForUpdate(true);
+  else if (action === "reset-app") resetApp();
   else if (action === "notify-on") enableNotify();
   else if (action === "notify-off") {
     saveNotify(false);
@@ -1345,6 +1348,9 @@ function watchServiceWorker() {
       return;
     }
     state.update.activated = true;
+    // Новая версия включилась сама — перезагрузиться, если человек сейчас ничего не вводит.
+    const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if (!typing && reloadOnce("auto-activate")) return;
     refreshUpdateUi();
   });
   navigator.serviceWorker.addEventListener("message", (event) => {
@@ -1490,7 +1496,39 @@ async function signOutAttendance() {
   render();
 }
 
+// Полный сброс: старые service worker'ы, кэши, старый адрес Worker и сессия кабинета.
+// Выбранная группа и копии расписания в localStorage остаются.
+async function resetApp() {
+  if (!confirm("Сбросить приложение? Кэш и вход в кабинет сотрутся, затем страница перезагрузится.")) return;
+  try {
+    const registrations = (await navigator.serviceWorker?.getRegistrations?.()) || [];
+    await Promise.all(registrations.map((registration) => registration.unregister()));
+  } catch {
+    /* нет service worker */
+  }
+  try {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((key) => caches.delete(key)));
+  } catch {
+    /* нет Cache Storage */
+  }
+  for (const key of ["rasp.workerUrl", "rasp.attendance.session", "rasp.attendance.snapshot"]) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* приватный режим */
+    }
+  }
+  location.replace(`./?reset=${Date.now()}`);
+}
+
 function boot() {
+  // Старые версии (до 23.09) хранили адрес Worker на workers.dev — он больше не нужен.
+  try {
+    localStorage.removeItem("rasp.workerUrl");
+  } catch {
+    /* приватный режим */
+  }
   state.seenToday = moscowIso();
   state.subgroup = loadSubgroup();
   const semester = semesterRange(state.seenToday);
