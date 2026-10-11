@@ -447,3 +447,13 @@ assert.equal(reloadAllowed({ version: "12", at: 1000 }, "12", 1000 + RELOAD_GUAR
 assert.equal(reloadAllowed({ version: "11", at: 1000 }, "12", 1001), true);
 
 console.log("selfcheck ok");
+
+// Таймауты посещаемости (v12).
+{
+  const { withTimeout, UpstreamTimeout } = await import("../worker/src/index.js");
+  const slow = withTimeout((input, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))), 50);
+  await assert.rejects(slow("https://vgltu.ru/lc/"), (error) => error instanceof UpstreamTimeout);
+  const { ATTENDANCE_SLOW_MESSAGE } = await import("../js/attendance.js");
+  assert.ok(ATTENDANCE_SLOW_MESSAGE.includes("долго"));
+}
+console.log("selfcheck timeouts ok");

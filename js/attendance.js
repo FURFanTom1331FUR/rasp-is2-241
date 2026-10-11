@@ -14,7 +14,25 @@ export class AttendanceError extends Error {
 }
 
 export const ATTENDANCE_NETWORK_MESSAGE =
-  "Нет связи с сервером посещаемости. Обновите страницу или удалите сайт с экрана и откройте снова. Если не поможет — Worker недоступен из сети.";
+  "Нет связи с сервером посещаемости (rasp-is2-241.pages.dev). Проверьте интернет и попробуйте ещё раз. На мобильном интернете с «белыми списками» сайт может не открываться — попробуйте через Wi‑Fi.";
+
+// Вход и журнал — это несколько запросов к vgltu.ru подряд через прокси, из России
+// они легко идут дольше 5 секунд общего таймаута. Ждём дольше и пишем честно, что медленно.
+export const ATTENDANCE_TIMEOUT_MS = 30000;
+export const ATTENDANCE_SLOW_MESSAGE =
+  "Кабинет ВГЛТУ (vgltu.ru) слишком долго не отвечает. Попробуйте ещё раз через минуту.";
+
+async function attendanceFetch(input, init) {
+  const started = Date.now();
+  try {
+    return await fetchText(input, init, ATTENDANCE_TIMEOUT_MS);
+  } catch (error) {
+    if (String(error?.name) === "AbortError" && Date.now() - started >= ATTENDANCE_TIMEOUT_MS - 100) {
+      throw new AttendanceError(ATTENDANCE_SLOW_MESSAGE, "timeout");
+    }
+    throw error;
+  }
+}
 
 export function asAttendanceError(error) {
   if (error instanceof AttendanceError) return error;
@@ -180,7 +198,7 @@ function parseJson(text) {
 
 export async function loginAttendance(workerUrl, login, password) {
   try {
-    const response = await fetchText(`${workerUrl}/login`, {
+    const response = await attendanceFetch(`${workerUrl}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ login, password }),
@@ -201,7 +219,7 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
     url.searchParams.set("from", from);
     url.searchParams.set("to", to);
     if (options.needName === false) url.searchParams.set("needName", "0");
-    const response = await fetchText(url, {
+    const response = await attendanceFetch(url, {
       headers: { Accept: "application/json", "X-Vgltu-Session": token },
     });
     const json = parseJson(response.text);

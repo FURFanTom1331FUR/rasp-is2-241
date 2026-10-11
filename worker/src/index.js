@@ -5,6 +5,25 @@ const LOGIN_PAGE = "https://vgltu.ru/lc/login";
 const ATTENDANCE = "https://vgltu.ru/lc/site/ajax-attendance-by-date";
 const LOGOUT_PAGE = "https://vgltu.ru/lc/logout";
 const UA = "rasp-is2-241 attendance-proxy";
+// Один запрос к vgltu.ru дольше этого — отвечаем понятной ошибкой, а не висим.
+const UPSTREAM_TIMEOUT_MS = 12000;
+
+export class UpstreamTimeout extends Error {}
+
+export function withTimeout(fetchImpl, ms = UPSTREAM_TIMEOUT_MS) {
+  return async (input, init = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetchImpl(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw new UpstreamTimeout("vgltu.ru timeout");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
 
 function corsHeaders(request) {
   const origin = request.headers.get("Origin");
@@ -241,6 +260,7 @@ export default {
   async fetch(request) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(request) });
     const { url, path } = routeOf(request);
+    const upstream = withTimeout(fetch);
     try {
       if (request.method === "POST" && path === "/login") {
         const payload = await request.json().catch(() => null);
@@ -249,32 +269,35 @@ export default {
         if (!login || !password || login.length > 64 || password.length > 200) {
           return json(request, 400, { ok: false, error: "Введите ID студента и пароль." });
         }
-        const result = await performLogin(login, password);
+        const result = await performLogin(login, password, upstream);
         return json(request, result.status, result.ok
           ? { ok: true, login: result.login, token: result.token, name: result.name || "" }
           : { ok: false, error: result.error });
       }
       if (request.method === "GET" && path === "/attendance") {
         const sessionToken = request.headers.get("X-Vgltu-Session") || "";
-        let name = "";
-        if (url.searchParams.get("needName") !== "0") {
-          try {
-            name = await fetchStudentName(sessionToken, fetch);
-          } catch {
-            name = "";
-          }
-        }
-        const result = await performAttendance(sessionToken, url.searchParams.get("from"), url.searchParams.get("to"), fetch, { name });
+        // ФИО и журнал — параллельно: раньше шли подряд и не укладывались в таймаут приложения.
+        const namePromise = url.searchParams.get("needName") !== "0"
+          ? fetchStudentName(sessionToken, upstream).catch(() => "")
+          : Promise.resolve("");
+        const [name, result] = await Promise.all([
+          namePromise,
+          performAttendance(sessionToken, url.searchParams.get("from"), url.searchParams.get("to"), upstream),
+        ]);
+        if (result.ok) result.name = name || "";
         return json(request, result.status, result.ok
           ? { ok: true, format: result.format, data: result.data, name: result.name || "" }
           : { ok: false, error: result.error });
       }
       if (request.method === "POST" && path === "/logout") {
-        await performLogout(request.headers.get("X-Vgltu-Session") || "");
+        await performLogout(request.headers.get("X-Vgltu-Session") || "", upstream);
         return json(request, 200, { ok: true });
       }
       return json(request, 404, { ok: false, error: "Неизвестный запрос." });
-    } catch {
+    } catch (error) {
+      if (error instanceof UpstreamTimeout) {
+        return json(request, 504, { ok: false, error: "Кабинет ВГЛТУ (vgltu.ru) слишком долго не отвечает. Попробуйте ещё раз через минуту." });
+      }
       return json(request, 502, { ok: false, error: "Нет связи с vgltu.ru." });
     }
   },
