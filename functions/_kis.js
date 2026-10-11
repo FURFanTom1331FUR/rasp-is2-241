@@ -5,6 +5,11 @@ import { parseScheduleHtml } from "../js/parse.js";
 
 export const KIS_LIST = "https://kis.vgltu.ru/list?type=Group";
 export const KIS_SCHEDULE = "https://kis.vgltu.ru/schedule";
+// Список преподавателей (~700 ФИО, ~47 КБ). kis.vgltu.ru иногда обрывает такой ответ на середине,
+// поэтому до трёх попыток; на краю Cloudflare копия держится сутки.
+export const KIS_TEACHERS = "https://kis.vgltu.ru/list?type=Teacher";
+export const TEACHERS_FRESH_S = 24 * 60 * 60;
+const TEACHER_RE = /^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё .'()\-]{1,59}$/;
 const UA = "rasp-is2-241 schedule-proxy (+https://github.com/FURFanTom1331FUR/rasp-is2-241)";
 const UPSTREAM_TIMEOUT_MS = 8000;
 const WINDOW_DAYS = 14;
@@ -92,6 +97,23 @@ export function isGroupCode(value) {
   return GROUP_RE.test(value || "") && value.trim() === value;
 }
 
+export function isTeacherName(value) {
+  return TEACHER_RE.test(value || "") && value.trim() === value;
+}
+
+async function withRetries(attempts, load) {
+  let last = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await load();
+    } catch (error) {
+      last = error;
+      if (error?.code === "status") break;
+    }
+  }
+  throw last;
+}
+
 export function shiftIso(iso, days) {
   const [year, month, day] = iso.split("-").map(Number);
   const next = new Date(Date.UTC(year, month - 1, day + days));
@@ -141,10 +163,30 @@ export async function loadGroups(fetchImpl = fetch) {
   return { ok: true, fetchedAt: new Date().toISOString(), source: KIS_LIST, groups };
 }
 
-export async function loadSchedule(group, from, windows, fetchImpl = fetch) {
+export async function loadTeachers(fetchImpl = fetch) {
+  const names = await withRetries(3, async () => {
+    const text = await fetchUpstream(KIS_TEACHERS, fetchImpl);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new UpstreamError("format", "Список преподавателей не JSON (оборван)");
+    }
+    const list = Array.isArray(data) ? data.map((item) => String(item).replace(/\s+/g, " ").trim()).filter(Boolean) : [];
+    if (list.length < 50) throw new UpstreamError("format", "Слишком короткий список преподавателей");
+    return list;
+  });
+  return { ok: true, fetchedAt: new Date().toISOString(), source: KIS_TEACHERS, teachers: [...new Set(names)] };
+}
+
+// kind: "group" — расписание группы, "teacher" — преподавателя (тот же HTML, параметр teacher=).
+export async function loadSchedule(group, from, windows, fetchImpl = fetch, kind = "group") {
   const starts = Array.from({ length: windows }, (_, index) => shiftIso(from, index * WINDOW_DAYS));
+  const param = kind === "teacher" ? "teacher" : "group";
   const pages = await Promise.all(
-    starts.map((start) => fetchUpstream(`${KIS_SCHEDULE}?date=${start}&group=${encodeURIComponent(group)}`, fetchImpl)),
+    starts.map((start) =>
+      withRetries(kind === "teacher" ? 2 : 1, () => fetchUpstream(`${KIS_SCHEDULE}?date=${start}&${param}=${encodeURIComponent(group)}`, fetchImpl)),
+    ),
   );
   const byDate = new Map();
   for (const html of pages) {
@@ -155,7 +197,7 @@ export async function loadSchedule(group, from, windows, fetchImpl = fetch) {
   const days = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
   return {
     ok: true,
-    group,
+    ...(kind === "teacher" ? { teacher: group } : { group }),
     fetchedAt: new Date().toISOString(),
     source: KIS_SCHEDULE,
     origin: "live",

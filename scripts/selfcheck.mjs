@@ -457,3 +457,34 @@ console.log("selfcheck ok");
   assert.ok(ATTENDANCE_SLOW_MESSAGE.includes("долго"));
 }
 console.log("selfcheck timeouts ok");
+
+// Преподаватели (v15).
+{
+  const { searchTeachers, foldName, normalizeTeacherList, mergeTeacherDays } = await import("../js/teachers.js");
+  const { isTeacherName, loadSchedule, loadTeachers } = await import("../functions/_kis.js");
+  const list = ["Гонца А.С.", "Разгоняева В.В.", "Иванов И.И.", "Ёлкин А.А."];
+  assert.deepEqual(searchTeachers(list, "гон"), ["Гонца А.С.", "Разгоняева В.В."]);
+  assert.deepEqual(searchTeachers(list, "ГОНЦА а с"), ["Гонца А.С."]);
+  assert.deepEqual(searchTeachers(list, "елк"), ["Ёлкин А.А."]);
+  assert.deepEqual(searchTeachers(list, ""), []);
+  assert.equal(foldName("Гонца  А.С."), "гонца а с");
+  assert.deepEqual(normalizeTeacherList({ teachers: [" Иванов  И.И. ", "Иванов И.И.", ""] }), ["Иванов И.И."]);
+  assert.deepEqual(mergeTeacherDays({ days: [{ date: "2026-10-12", lessons: [] }] }, [{ date: "2026-10-12", lessons: [1] }, { date: "2026-10-13", lessons: [] }]).map((d) => d.lessons.length), [1, 0]);
+  assert.equal(isTeacherName("Гонца А.С."), true);
+  assert.equal(isTeacherName("<script>"), false);
+  const html = '<div><strong>12 октября 2026</strong></div><table><tr><td style="width:75px">11:50-13:20</td><td style="width:auto">лек. Безопасность жизнедеятельности<br/><br />ОП1-251-ОТ<br/> ОП1-252-ОТ<br/><br /><a href="x">210Пр/АПП</a><br />Гонца А.С.</td></tr></table>';
+  const urls = [];
+  const fake = async (url) => { urls.push(String(url)); return new Response(html); };
+  const record = await loadSchedule("Гонца А.С.", "2026-10-12", 1, fake, "teacher");
+  assert.ok(urls[0].includes("teacher=%D0%93"));
+  assert.equal(record.teacher, "Гонца А.С.");
+  assert.deepEqual(record.days[0].lessons[0].groups, ["ОП1-251-ОТ", "ОП1-252-ОТ"]);
+  assert.equal(record.days[0].lessons[0].room, "210Пр/АПП");
+  let calls = 0;
+  const names = Array.from({ length: 60 }, (_, i) => `Преподаватель${i} А.А.`);
+  const flaky = async () => { calls += 1; return new Response(calls < 3 ? '["Абр' : JSON.stringify(names)); };
+  const teachers = await loadTeachers(flaky);
+  assert.equal(calls, 3);
+  assert.equal(teachers.teachers.length, 60);
+}
+console.log("selfcheck teachers ok");

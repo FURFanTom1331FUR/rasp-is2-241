@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v14";
+const SHELL = "rasp-shell-v15";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.
@@ -20,10 +20,12 @@ const FILES = [
   "./js/attendance.js",
   "./js/net.js",
   "./js/version.js",
+  "./js/teachers.js",
   "./js/app.js",
   "./version.json",
   "./manifest.webmanifest",
   "./data/groups.json",
+  "./data/teachers.json",
   "./data/schedules/ИС2-241-ОБ.json",
   "./data/schedules/ИС2-242-ОБ.json",
   "./data/schedules/ИС2-243-ОБ.json",
@@ -43,14 +45,15 @@ const REQUIRED = [
   "./js/parse.js",
   "./js/config.js",
   "./js/version.js",
+  "./js/teachers.js",
 ];
 
 const API_PATHS = new Set(["/login", "/attendance", "/logout"]);
 // Прокси расписания (functions/groups.js, functions/schedule.js): сеть с таймаутом, потом копия.
-const PROXY_PATHS = new Set(["./groups", "./schedule"].map((path) => new URL(path, self.location.href).pathname));
+const PROXY_PATHS = new Set(["./groups", "./schedule", "./teachers"].map((path) => new URL(path, self.location.href).pathname));
 // Зеркало на GitHub Pages берёт те же данные с Cloudflare Pages — их тоже держим офлайн.
 const PAGES_ORIGIN = "https://rasp-is2-241.pages.dev";
-const PAGES_PROXY_PATHS = new Set(["/groups", "/schedule"]);
+const PAGES_PROXY_PATHS = new Set(["/groups", "/schedule", "/teachers"]);
 const VERSION_PATH = new URL("./version.json", self.location.href).pathname;
 
 // Phones still on the network-first worker have HTML that waits on the network
@@ -298,10 +301,11 @@ async function purgeBadData(cacheName) {
   }
 }
 
-// Для /schedule держим одну копию на группу: новое окно заменяет старое.
+// Для /schedule держим одну копию на группу (или преподавателя): новое окно заменяет старое.
 async function dropOlderSchedules(cache, url) {
   if (!url.pathname.endsWith("/schedule")) return;
   const group = url.searchParams.get("group");
+  const teacher = url.searchParams.get("teacher");
   try {
     for (const request of await cache.keys()) {
       const other = new URL(request.url);
@@ -309,6 +313,7 @@ async function dropOlderSchedules(cache, url) {
         other.origin === url.origin &&
         other.pathname === url.pathname &&
         other.searchParams.get("group") === group &&
+        other.searchParams.get("teacher") === teacher &&
         other.href !== url.href
       ) {
         await cache.delete(request);

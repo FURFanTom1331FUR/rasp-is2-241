@@ -51,12 +51,30 @@ import {
   saveRecord,
   saveSubgroup,
 } from "./store.js";
+import {
+  loadCurrentTeacher,
+  loadFavorites,
+  loadTeacherList,
+  loadTeacherRecent,
+  loadTeacherRecord,
+  mergeTeacherDays,
+  normalizeTeacherList,
+  rememberTeacher,
+  saveCurrentTeacher,
+  saveTeacherList,
+  saveTeacherRecord,
+  searchTeachers,
+  toggleFavorite,
+} from "./teachers.js";
 
 // Прокси (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
 // На pages.dev — тот же домен, с зеркала GitHub Pages — https://rasp-is2-241.pages.dev.
 const API_BASE = apiBase();
 const LIVE_SCHEDULE = `${API_BASE}schedule`;
 const LIVE_GROUPS = `${API_BASE}groups`;
+const LIVE_TEACHERS = `${API_BASE}teachers`;
+const TEACHERS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TEACHER_FRESH_MS = 45 * 60 * 1000;
 const LIVE_WINDOWS = 2;
 const LIVE_TIMEOUT_MS = 12000;
 const GROUPS_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -99,6 +117,19 @@ const state = {
     note: "",
     // «Обновлено до версии N» — один раз после обновления.
     justUpdated: false,
+  },
+  teacher: {
+    list: [],
+    listAt: "",
+    listLoading: false,
+    listIssue: "",
+    name: "",
+    record: null,
+    loading: false,
+    issue: "",
+    query: "",
+    picking: false,
+    week: "",
   },
   attendance: {
     error: "",
@@ -437,6 +468,11 @@ function dateHero(iso) {
   return `<div class="hero">${kicker}${title}${sub}${back}</div>`;
 }
 
+// «Фамилия И.О.» — ссылка на расписание преподавателя; «Вакансия…» и прочее — просто текст.
+function looksLikeTeacher(name) {
+  return /^[А-ЯЁ][А-Яа-яЁё'-]+(?:\s[А-ЯЁ][а-яё'-]+)?\s[А-ЯЁ]\.\s?(?:[А-ЯЁ]\.)?$/.test(String(name || "").trim());
+}
+
 function lessonCard(iso, lesson) {
   const phase = phaseOf(iso, lesson);
   const typeClass = lesson.type || "none";
@@ -447,7 +483,10 @@ function lessonCard(iso, lesson) {
     phase === "now" ? `<span class="chip now">сейчас</span>` : "",
   ].join("");
   const bits = [];
-  if (lesson.teacher) bits.push(`<span>${esc(lesson.teacher)}</span>`);
+  if (lesson.teacher && !looksLikeTeacher(lesson.teacher)) bits.push(`<span>${esc(lesson.teacher)}</span>`);
+  else if (lesson.teacher) {
+    bits.push(`<button type="button" class="link-btn" data-action="open-teacher" data-teacher="${esc(lesson.teacher)}" title="Расписание преподавателя">${esc(lesson.teacher)}</button>`);
+  }
   if (lesson.room) {
     if (bits.length) bits.push(`<span class="dot">·</span>`);
     bits.push(`<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a>`);
@@ -805,6 +844,7 @@ function navIcon(name) {
     week: `<path d="M5 7h14M5 12h14M5 17h9"/>`,
     schedule: `<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/><circle cx="12" cy="15" r="1.3" fill="currentColor" stroke="none"/>`,
     attendance: `<rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 12.2l2.2 2.2L16 9"/>`,
+    teachers: `<circle cx="12" cy="8" r="3.4"/><path d="M5.5 20c.8-3.6 3.3-5.6 6.5-5.6s5.7 2 6.5 5.6"/>`,
     more: `<circle cx="6" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.2" fill="currentColor" stroke="none"/>`,
   };
   return `<svg ${common}>${paths[name]}</svg>`;
@@ -813,6 +853,7 @@ function navIcon(name) {
 function navSection() {
   if (state.mode === "more") return "more";
   if (state.mode === "attendance") return "attendance";
+  if (state.mode === "teachers") return "teachers";
   return "schedule";
 }
 
@@ -821,6 +862,7 @@ function nav() {
   const items = [
     ["schedule", "Расписание"],
     ["attendance", "Посещаемость"],
+    ["teachers", "Преподаватели"],
     ["more", "Ещё"],
   ];
   return `<nav class="nav">${items
@@ -877,11 +919,277 @@ function versionBlock() {
     </article>`;
 }
 
+// ===== Преподаватели =====
+
+function teacherListStamp() {
+  const value = Date.parse(state.teacher.listAt || "");
+  return Number.isNaN(value) ? 0 : value;
+}
+
+async function ensureTeacherList(force = false) {
+  const t = state.teacher;
+  if (!t.list.length) {
+    const saved = loadTeacherList();
+    if (saved?.teachers?.length) {
+      t.list = saved.teachers;
+      t.listAt = saved.fetchedAt;
+    } else {
+      // Копия из репозитория — список есть сразу и без сети.
+      try {
+        const response = await fetchText("./data/teachers.json", {}, 8000);
+        const data = JSON.parse(response.text);
+        const names = normalizeTeacherList(data);
+        if (names.length) {
+          t.list = names;
+          t.listAt = String(data.fetchedAt || "");
+          if (state.mode === "teachers") refreshTeacherSuggest();
+        }
+      } catch {
+        /* нет копии — ниже попробуем сеть */
+      }
+    }
+  }
+  if (!navigator.onLine) return;
+  if (!force && t.list.length && Date.now() - teacherListStamp() < TEACHERS_MAX_AGE_MS) return;
+  if (t.listLoading) return;
+  t.listLoading = true;
+  try {
+    const response = await fetchText(LIVE_TEACHERS, {}, 20000);
+    const data = JSON.parse(response.text);
+    const names = normalizeTeacherList(data);
+    if (!response.ok || names.length < 50) throw new Error("bad list");
+    t.list = names;
+    t.listAt = String(data.fetchedAt || new Date().toISOString());
+    t.listIssue = "";
+    saveTeacherList(names, t.listAt);
+  } catch {
+    t.listIssue = t.list.length ? "" : "Не удалось загрузить список преподавателей с сайта ВГЛТУ. Попробуйте позже.";
+  } finally {
+    t.listLoading = false;
+  }
+  if (state.mode === "teachers") refreshTeacherSuggest();
+}
+
+function teacherWeekDays(monday) {
+  return Array.from({ length: 7 }, (_, index) => addDays(monday, index));
+}
+
+function teacherDay(iso) {
+  return state.teacher.record?.days?.find((day) => day.date === iso) || null;
+}
+
+function teacherWeekLoaded(monday) {
+  return teacherWeekDays(monday).slice(0, 6).every((iso) => teacherDay(iso));
+}
+
+async function loadTeacherWeek(monday, force = false) {
+  const t = state.teacher;
+  const name = t.name;
+  if (!name) return;
+  const fresh = Date.now() - (Date.parse(t.record?.fetchedAt || "") || 0) < TEACHER_FRESH_MS;
+  if (!force && teacherWeekLoaded(monday) && fresh) return;
+  if (!navigator.onLine) {
+    t.issue = "offline";
+    if (state.mode === "teachers") render();
+    return;
+  }
+  t.loading = true;
+  t.issue = "";
+  if (state.mode === "teachers") render();
+  const url = `${LIVE_SCHEDULE}?date=${monday}&teacher=${encodeURIComponent(name)}&windows=1`;
+  let issue = "";
+  try {
+    const response = await fetchText(url, {}, 25000);
+    let data = null;
+    try {
+      data = JSON.parse(response.text);
+    } catch {
+      data = null;
+    }
+    if (!data || typeof data !== "object") issue = "offline";
+    else if (!response.ok || !Array.isArray(data.days) || !data.days.length) issue = "upstream";
+    else {
+      if (t.name !== name) return;
+      const fallback = response.headers?.get?.("X-Rasp-Fallback") || "";
+      if (fallback === "offline" || fallback === "upstream") issue = fallback;
+      else if (data.stale) issue = "upstream";
+      const record = {
+        teacher: name,
+        fetchedAt: data.fetchedAt || new Date().toISOString(),
+        source: data.source || "https://kis.vgltu.ru/schedule",
+        days: mergeTeacherDays(t.record, data.days, addDays(mondayOf(moscowIso()), -35)),
+      };
+      t.record = record;
+      saveTeacherRecord(name, record);
+    }
+  } catch {
+    issue = "offline";
+  }
+  if (t.name !== name) return;
+  t.loading = false;
+  t.issue = issue;
+  if (state.mode === "teachers") render();
+}
+
+function openTeacher(name) {
+  const t = state.teacher;
+  const clean = String(name || "").replace(/\s+/g, " ").trim();
+  if (!clean) return;
+  t.name = clean;
+  t.picking = false;
+  t.query = "";
+  t.issue = "";
+  t.record = loadTeacherRecord(clean);
+  t.week = mondayOf(moscowIso());
+  saveCurrentTeacher(clean);
+  rememberTeacher(clean);
+  state.mode = "teachers";
+  render();
+  window.scrollTo?.(0, 0);
+  loadTeacherWeek(t.week);
+  ensureTeacherList();
+}
+
+function teacherButton(name, favorites) {
+  const star = favorites.includes(name) ? `<span class="star" aria-label="в избранном">★</span>` : "";
+  return `<li><button type="button" data-action="pick-teacher" data-teacher="${esc(name)}">${esc(name)}${star}</button></li>`;
+}
+
+function teacherSuggestHtml() {
+  const t = state.teacher;
+  const favorites = loadFavorites();
+  if (t.query.trim()) {
+    const found = searchTeachers(t.list, t.query);
+    if (!t.list.length) {
+      return `<li><p class="status">${esc(t.listIssue || "Загружаем список преподавателей…")}</p></li>`;
+    }
+    if (!found.length) return `<li><p class="status">Не нашли «${esc(t.query.trim())}». Проверьте фамилию — достаточно первых букв.</p></li>`;
+    return found.map((name) => teacherButton(name, favorites)).join("");
+  }
+  const recent = loadTeacherRecent().filter((name) => !favorites.includes(name));
+  const parts = [];
+  if (favorites.length) parts.push(`<li class="suggest-head">Избранные</li>${favorites.map((name) => teacherButton(name, favorites)).join("")}`);
+  if (recent.length) parts.push(`<li class="suggest-head">Недавние</li>${recent.map((name) => teacherButton(name, favorites)).join("")}`);
+  if (!parts.length) {
+    const count = t.list.length ? `В списке ${t.list.length} преподавателей.` : esc(t.listIssue || "Загружаем список преподавателей…");
+    parts.push(`<li><p class="status">Начните вводить фамилию, например «Гон». ${count}</p></li>`);
+  }
+  return parts.join("");
+}
+
+function refreshTeacherSuggest() {
+  const list = document.getElementById("teacher-suggest");
+  if (list) list.innerHTML = teacherSuggestHtml();
+}
+
+function teacherPickerHtml() {
+  const t = state.teacher;
+  return `<section class="more teacher-screen">
+    <h1>Преподаватели</h1>
+    <form class="block teacher-search" data-teacher-form>
+      <label class="field">Фамилия преподавателя
+        <input class="search" id="teacher-query" name="teacher" value="${esc(t.query)}" placeholder="Например, Гонца" autocomplete="off" enterkeyhint="search" />
+      </label>
+      <ul class="suggest" id="teacher-suggest">${teacherSuggestHtml()}</ul>
+      ${t.name ? `<button class="ghost" type="button" data-action="teacher-cancel">Назад к ${esc(t.name)}</button>` : ""}
+    </form>
+    <p class="status teacher-source">Расписание преподавателей с сайта ВГЛТУ (kis.vgltu.ru), как и у групп.</p>
+  </section>`;
+}
+
+function teacherLessonCard(iso, lesson) {
+  const phase = phaseOf(iso, lesson);
+  const badge = subgroupBadgeLabel(lessonSubgroup(lesson));
+  const chips = [
+    lesson.type ? `<span class="chip ${esc(lesson.type)}">${esc(lesson.type)}</span>` : "",
+    badge ? `<span class="chip subgroup">${esc(badge)}</span>` : "",
+    phase === "now" ? `<span class="chip now">сейчас</span>` : "",
+  ].join("");
+  const bits = [];
+  const groups = (lesson.groups || []).filter(Boolean);
+  if (groups.length) bits.push(`<span>${esc(groups.join(", "))}</span>`);
+  if (lesson.room) {
+    if (bits.length) bits.push(`<span class="dot">·</span>`);
+    bits.push(`<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a>`);
+  }
+  return `<article class="card ${esc(lesson.type || "none")} ${phase}">
+    <div class="card-top">
+      <p class="time">${esc(lesson.start)}<span class="time-sep">–</span>${esc(lesson.end)}</p>
+      <div class="chips">${chips}</div>
+    </div>
+    <h2 class="subject">${esc(lesson.subject)}</h2>
+    ${bits.length ? `<p class="meta-line">${bits.join("")}</p>` : ""}
+  </article>`;
+}
+
+function teacherStatus() {
+  const t = state.teacher;
+  if (t.loading) return "Загружаем расписание преподавателя…";
+  const stamp = t.record?.fetchedAt ? formatStamp(t.record.fetchedAt) : "";
+  if (t.issue === "offline") return stamp ? `Нет связи с сервером — показана копия от ${stamp}.` : "Нет связи с сервером, а сохранённой копии ещё нет. Откройте, когда будет интернет.";
+  if (t.issue === "upstream") return stamp ? `Сайт ВГЛТУ не ответил — показана копия от ${stamp}.` : "Сайт ВГЛТУ не ответил. Нажмите «Обновить» чуть позже.";
+  return stamp ? `Обновлено с сайта ВГЛТУ ${stamp}.` : "Расписание ещё не загружено.";
+}
+
+function teacherWeekHtml() {
+  const t = state.teacher;
+  const today = moscowIso();
+  const days = teacherWeekDays(t.week).filter((iso, index) => index < 6 || teacherDay(iso)?.lessons?.length);
+  return days
+    .map((iso) => {
+      const day = teacherDay(iso);
+      const mark = iso === today ? ` <span class="chip">сегодня</span>` : "";
+      let body;
+      if (!day) {
+        body = t.loading
+          ? `<div class="card skeleton"></div>`
+          : `<div class="empty"><p class="empty-title">Нет данных</p><p>${t.issue ? "Нет связи — откройте этот день, когда будет интернет." : "Нажмите «Обновить»."}</p></div>`;
+      } else if (!day.lessons.length) body = `<div class="empty"><p class="empty-title">Нет пар</p></div>`;
+      else body = day.lessons.map((lesson) => teacherLessonCard(iso, lesson)).join("");
+      return `<section class="${iso < today ? "past-day" : ""}"><h2>${esc(weekdayName(iso))}, ${esc(formatDots(iso))}${mark}</h2>${body}</section>`;
+    })
+    .join("");
+}
+
+function teacherView() {
+  const t = state.teacher;
+  if (!t.name || t.picking) return teacherPickerHtml();
+  const favorite = loadFavorites().includes(t.name);
+  const monday = t.week;
+  const sunday = addDays(monday, 6);
+  const current = monday === mondayOf(moscowIso());
+  return `<div class="hero teacher-hero">
+      <p class="kicker">Преподаватель</p>
+      <h1 class="hero-date hero-range teacher-name">${esc(t.name)}</h1>
+      <div class="teacher-actions">
+        <button type="button" class="text-btn" data-action="teacher-fav" aria-pressed="${favorite ? "true" : "false"}">${favorite ? "★ В избранном" : "☆ В избранное"}</button>
+        <button type="button" class="text-btn" data-action="teacher-change">Сменить</button>
+      </div>
+    </div>
+    <div class="date-card teacher-week-nav">
+      <div class="date-card-head">
+        <button class="shift" type="button" data-action="teacher-week" data-delta="-7" aria-label="Предыдущая неделя">‹</button>
+        <div><p>${current ? "Эта неделя" : "Неделя"}</p><strong>${esc(formatDots(monday))} – ${esc(formatDots(sunday))}</strong></div>
+        <button class="shift" type="button" data-action="teacher-week" data-delta="7" aria-label="Следующая неделя">›</button>
+      </div>
+      ${current ? "" : `<button type="button" class="text-btn" data-action="teacher-week" data-delta="0">К текущей неделе</button>`}
+    </div>
+    <div class="week teacher-week">${teacherWeekHtml()}</div>
+    <section class="panel">
+      <div class="status-row">
+        <p class="status" role="status">${esc(teacherStatus())}</p>
+        <button class="text-btn" type="button" data-action="teacher-refresh">Обновить</button>
+      </div>
+    </section>`;
+}
+
 function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
   const main = state.mode === "attendance"
     ? attendanceView()
+    : state.mode === "teachers"
+      ? teacherView()
     : state.mode === "more"
       ? moreView()
       : !state.group
@@ -1013,6 +1321,15 @@ app.addEventListener("click", (event) => {
       state.mode = "week";
       render();
       ensureWeek();
+    } else if (mode === "teachers") {
+      if (state.mode === "teachers" && state.teacher.name && !state.teacher.picking) {
+        state.teacher.picking = true;
+      }
+      state.mode = "teachers";
+      render();
+      ensureTeacherList();
+      if (state.teacher.name && !state.teacher.picking) loadTeacherWeek(state.teacher.week || mondayOf(moscowIso()));
+      if (state.teacher.picking || !state.teacher.name) document.getElementById("teacher-query")?.focus();
     } else if (mode === "attendance") {
       state.mode = "attendance";
       render();
@@ -1021,7 +1338,26 @@ app.addEventListener("click", (event) => {
       state.mode = "more";
       render();
     }
-  } else if (action === "go-today") goToday();
+  } else if (action === "pick-teacher" || action === "open-teacher") openTeacher(button.dataset.teacher);
+  else if (action === "teacher-fav") {
+    if (state.teacher.name) toggleFavorite(state.teacher.name);
+    render();
+  } else if (action === "teacher-change") {
+    state.teacher.picking = true;
+    state.teacher.query = "";
+    render();
+    ensureTeacherList();
+    document.getElementById("teacher-query")?.focus();
+  } else if (action === "teacher-cancel") {
+    state.teacher.picking = false;
+    render();
+  } else if (action === "teacher-week") {
+    const delta = Number(button.dataset.delta);
+    state.teacher.week = delta ? addDays(state.teacher.week, delta) : mondayOf(moscowIso());
+    render();
+    loadTeacherWeek(state.teacher.week);
+  } else if (action === "teacher-refresh") loadTeacherWeek(state.teacher.week, true);
+  else if (action === "go-today") goToday();
   else if (action === "shift-day") {
     const next = addDays(activeIso(), Number(button.dataset.delta));
     state.follow = "none";
@@ -1085,6 +1421,11 @@ app.addEventListener("click", (event) => {
 });
 
 app.addEventListener("input", (event) => {
+  if (event.target.id === "teacher-query") {
+    state.teacher.query = event.target.value;
+    refreshTeacherSuggest();
+    return;
+  }
   if (event.target.id !== "group-query") return;
   state.query = event.target.value;
   const list = document.getElementById("suggest");
@@ -1098,6 +1439,10 @@ app.addEventListener("submit", (event) => {
   } else if (event.target.matches("[data-group-form]")) {
     event.preventDefault();
     commitGroup(state.query);
+  } else if (event.target.matches("[data-teacher-form]")) {
+    event.preventDefault();
+    const first = searchTeachers(state.teacher.list, state.teacher.query, 1)[0];
+    if (first) openTeacher(first);
   } else if (event.target.matches("[data-attendance-form]")) {
     event.preventDefault();
     submitAttendance(event.target);
@@ -1531,6 +1876,14 @@ function boot() {
   }
   state.seenToday = moscowIso();
   state.subgroup = loadSubgroup();
+  state.teacher.name = loadCurrentTeacher();
+  state.teacher.record = state.teacher.name ? loadTeacherRecord(state.teacher.name) : null;
+  state.teacher.week = mondayOf(state.seenToday);
+  const savedTeachers = loadTeacherList();
+  if (savedTeachers) {
+    state.teacher.list = savedTeachers.teachers;
+    state.teacher.listAt = savedTeachers.fetchedAt;
+  }
   const semester = semesterRange(state.seenToday);
   state.attendance.from = semester.from;
   state.attendance.to = state.seenToday;
