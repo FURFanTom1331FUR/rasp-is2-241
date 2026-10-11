@@ -34,6 +34,22 @@ async function attendanceFetch(input, init) {
   }
 }
 
+export const ATTENDANCE_BLOCKED_MESSAGE =
+  "Сайт приложения (rasp-is2-241.pages.dev) сейчас не открывается из вашей сети — расписание показано из памяти. На мобильном интернете с «белыми списками» вход не работает: подключитесь к Wi‑Fi и попробуйте снова.";
+
+// Сеть упала на входе/журнале: проверяем, открывается ли сам сайт, чтобы сказать точнее.
+async function explainNetwork(workerUrl, error) {
+  const wrapped = asAttendanceError(error);
+  if (wrapped.code !== "network") return wrapped;
+  try {
+    const probe = await fetchText(`${workerUrl}/version.json?t=${Date.now()}`, { cache: "no-store" }, 6000);
+    if (probe.ok) return wrapped;
+  } catch {
+    /* сайт тоже не отвечает */
+  }
+  return new AttendanceError(ATTENDANCE_BLOCKED_MESSAGE, "network");
+}
+
 export function asAttendanceError(error) {
   if (error instanceof AttendanceError) return error;
   const name = String(error?.name || "");
@@ -209,7 +225,7 @@ export async function loginAttendance(workerUrl, login, password) {
     }
     return { login: String(json.login || login), token: String(json.token), name: cleanStudentName(json.name) };
   } catch (error) {
-    throw asAttendanceError(error);
+    throw await explainNetwork(workerUrl, error);
   }
 }
 
@@ -235,7 +251,7 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
       name: cleanStudentName(json.name),
     };
   } catch (error) {
-    throw asAttendanceError(error);
+    throw await explainNetwork(workerUrl, error);
   }
 }
 

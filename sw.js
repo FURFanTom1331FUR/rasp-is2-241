@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v12";
+const SHELL = "rasp-shell-v13";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.

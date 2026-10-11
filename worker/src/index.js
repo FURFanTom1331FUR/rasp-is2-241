@@ -8,6 +8,9 @@ const UA = "rasp-is2-241 attendance-proxy";
 // Один запрос к vgltu.ru дольше этого — отвечаем понятной ошибкой, а не висим.
 const UPSTREAM_TIMEOUT_MS = 12000;
 
+// ФИО — не главное: если кабинет тормозит, журнал отдаём без него.
+const NAME_TIMEOUT_MS = 6000;
+
 export class UpstreamTimeout extends Error {}
 
 export function withTimeout(fetchImpl, ms = UPSTREAM_TIMEOUT_MS) {
@@ -182,17 +185,9 @@ export async function performLogin(login, password, fetchImpl = fetch) {
     if (!/^[A-Za-z0-9]{8,128}$/.test(session)) {
       return { ok: false, status: 502, error: "Кабинет не выдал сессию." };
     }
-    let name = "";
-    try {
-      const landed = safeLcUrl(location);
-      if (landed) name = studentNameFromHtml(await (await fetchImpl(landed, {
-        redirect: "manual",
-        headers: { Accept: "text/html", Cookie: cookieHeader(jar), "User-Agent": UA },
-      })).text());
-      if (!name) name = await fetchStudentName(session, fetchImpl);
-    } catch {
-      name = "";
-    }
+    // ФИО здесь не ищем: это ещё 2–4 запроса к vgltu.ru, и вход не укладывался во время.
+    // Приложение сразу после входа запрашивает журнал с needName — ФИО придёт оттуда.
+    const name = "";
     return { ok: true, status: 200, login, token: session, name };
   }
   const failureHtml = await posted.text();
@@ -278,7 +273,10 @@ export default {
         const sessionToken = request.headers.get("X-Vgltu-Session") || "";
         // ФИО и журнал — параллельно: раньше шли подряд и не укладывались в таймаут приложения.
         const namePromise = url.searchParams.get("needName") !== "0"
-          ? fetchStudentName(sessionToken, upstream).catch(() => "")
+          ? Promise.race([
+              fetchStudentName(sessionToken, withTimeout(fetch, NAME_TIMEOUT_MS)).catch(() => ""),
+              new Promise((resolve) => setTimeout(() => resolve(""), NAME_TIMEOUT_MS)),
+            ])
           : Promise.resolve("");
         const [name, result] = await Promise.all([
           namePromise,
