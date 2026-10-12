@@ -539,3 +539,84 @@ console.log("selfcheck teachers ok");
   assert.equal(shareFileName("Гонца А.С.", "2026-10-12_2026-10-17"), "pary-Гонца_А.С.-2026-10-12_2026-10-17.png");
 }
 console.log("selfcheck rooms ok");
+
+// Уведомления: Web Push и cron (v17).
+{
+  const wp = await import("../functions/_webpush.js");
+  const push = await import("../functions/_push.js");
+  // Шифрование aes128gcm: расшифровываем ключом «браузера».
+  const enc = new TextEncoder();
+  const ua = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const uaPub = new Uint8Array(await crypto.subtle.exportKey("raw", ua.publicKey));
+  const auth = crypto.getRandomValues(new Uint8Array(16));
+  const sub = { endpoint: "https://fcm.googleapis.com/fcm/send/abc", keys: { p256dh: wp.bytesToB64url(uaPub), auth: wp.bytesToB64url(auth) } };
+  const sealed = await wp.encryptPayload(sub, '{"t":"пара"}');
+  const salt = sealed.slice(0, 16);
+  const asPub = sealed.slice(21, 21 + sealed[20]);
+  const hk = async (s, i, info, n) => new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: s, info }, await crypto.subtle.importKey("raw", i, "HKDF", false, ["deriveBits"]), n * 8));
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: await crypto.subtle.importKey("raw", asPub, { name: "ECDH", namedCurve: "P-256" }, false, []) }, ua.privateKey, 256));
+  const ikm = await hk(auth, ecdh, new Uint8Array([...enc.encode("WebPush: info\0"), ...uaPub, ...asPub]), 32);
+  const cek = await hk(salt, ikm, enc.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hk(salt, ikm, enc.encode("Content-Encoding: nonce\0"), 12);
+  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["decrypt"]), sealed.slice(21 + sealed[20])));
+  assert.equal(new TextDecoder().decode(plain.slice(0, -1)), '{"t":"пара"}');
+  assert.equal(plain.at(-1), 2);
+  // VAPID JWT подписан и проверяется публичным ключом.
+  const signer = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const vapid = { publicKey: wp.bytesToB64url(new Uint8Array(await crypto.subtle.exportKey("raw", signer.publicKey))), privateJwk: JSON.stringify(await crypto.subtle.exportKey("jwk", signer.privateKey)) };
+  const header = (await wp.vapidHeaders(sub.endpoint, vapid)).Authorization;
+  const token = header.slice("vapid t=".length).split(", k=")[0].split(".");
+  assert.ok(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, signer.publicKey, wp.b64urlToBytes(token[2]), enc.encode(`${token[0]}.${token[1]}`)));
+  assert.equal(JSON.parse(Buffer.from(token[1], "base64url")).aud, "https://fcm.googleapis.com");
+  // Время и слоты.
+  assert.deepEqual(push.moscowParts(Date.parse("2026-10-12T10:30:00Z")), { date: "2026-10-12", hhmm: "13:30" });
+  assert.deepEqual(push.slotsDue(10, "13:30"), ["13:40"]);
+  assert.deepEqual(push.slotsDue(60, "07:30"), ["08:30"]);
+  assert.deepEqual(push.slotsDue(10, "13:31"), []);
+  assert.equal(push.inQuiet("22:00-08:00", "07:59"), true);
+  assert.equal(push.inQuiet("22:00-08:00", "08:20"), false);
+  assert.equal(push.inQuiet("", "03:00"), false);
+  assert.equal(push.cleanSettings({ lead: 7, subgroup: "3", quiet: "x", group: "ИС2-241-ОБ" }).lead, 10);
+  assert.equal(push.cleanSettings({ appUrl: "https://evil.example/" }).appUrl, "https://rasp-is2-241.pages.dev/");
+  assert.equal(push.validSubscription({ endpoint: "http://127.0.0.1/x", keys: sub.keys }), false);
+  assert.equal(push.validSubscription(sub), true);
+  const day = { date: "2026-10-12", lessons: [
+    { start: "11:50", end: "13:20", subject: "Физра", type: "", room: "сз", teacher: "", subgroup: null },
+    { start: "13:40", end: "15:10", subject: "ОВП", type: "пр", room: "207Пр/АПП", teacher: "Гонца А.С.", subgroup: "1 п.г." },
+    { start: "13:40", end: "15:10", subject: "Сети", type: "лаб", room: "101", teacher: "Иванов И.И.", subgroup: "2 п.г." },
+  ] };
+  assert.equal(push.lessonsForSlot(day, "13:40", { subgroup: "all" }).length, 2);
+  assert.equal(push.lessonsForSlot(day, "13:40", { subgroup: "2" })[0].subject, "Сети");
+  assert.equal(push.lessonsForSlot(day, "13:40", { subgroup: "1", firstOnly: true }).length, 0);
+  assert.equal(push.lessonsForSlot(day, "11:50", { subgroup: "1", firstOnly: true }).length, 1);
+  const payload = push.buildPayload(push.lessonsForSlot(day, "13:40", { subgroup: "1" }), "2026-10-12", { lead: 10, appUrl: "https://rasp-is2-241.pages.dev/", group: "ИС2-241-ОБ" });
+  assert.equal(payload.title, "Через 10 мин: ОВП");
+  assert.equal(payload.body, "13:40–15:10 · пр · 1 пг · 207Пр/АПП · Гонца А.С.");
+  assert.equal(payload.url, "https://rasp-is2-241.pages.dev/?date=2026-10-12");
+  // Полный прогон cron с памятью вместо KV и поддельной отправкой.
+  const store = new Map();
+  const kv = { get: async (k, type) => (store.has(k) ? (type === "json" ? JSON.parse(store.get(k)) : store.get(k)) : null), put: async (k, v) => store.set(k, v) };
+  const env = { PUSH_KV: kv, VAPID_PUBLIC: vapid.publicKey, VAPID_PRIVATE: vapid.privateJwk };
+  const post = (path, data) => push.handlePush({ request: new Request(`https://x/push/${path}`, { method: "POST", body: JSON.stringify(data), headers: { Origin: "https://furfantom1331fur.github.io" } }), env }, path);
+  const r1 = await post("subscribe", { subscription: sub, settings: { group: "ИС2-241-ОБ", subgroup: "1", lead: 10, appUrl: "https://furfantom1331fur.github.io/rasp-is2-241/" } });
+  assert.equal(r1.status, 200);
+  assert.equal(r1.headers.get("Access-Control-Allow-Origin"), "https://furfantom1331fur.github.io");
+  const gone = { ...sub, endpoint: "https://fcm.googleapis.com/fcm/send/old" };
+  await post("subscribe", { subscription: gone, settings: { group: "ИС2-241-ОБ", lead: 10 } });
+  assert.equal(Object.keys(JSON.parse(store.get("subs")).subs).length, 2);
+  const status = await (await post("status", { endpoint: sub.endpoint })).json();
+  assert.equal(status.subscribed, true);
+  const sent = [];
+  const fakeSchedule = async () => new Response(JSON.stringify({ days: [day] }));
+  const fakeSend = async (s, p) => { sent.push([s.endpoint, p]); return s.endpoint.endsWith("old") ? { ok: false, status: 410, gone: true } : { ok: true, status: 201, gone: false }; };
+  const idle = await push.runCron(env, Date.parse("2026-10-12T10:31:00Z"), { fetchImpl: fakeSchedule, send: fakeSend });
+  assert.equal(idle.idle, true);
+  const report = await push.runCron(env, Date.parse("2026-10-12T10:30:00Z"), { fetchImpl: fakeSchedule, send: fakeSend });
+  assert.equal(report.sent, 1);
+  assert.equal(report.gone, 1);
+  assert.equal(sent.find(([e]) => e === sub.endpoint)[1].url, "https://furfantom1331fur.github.io/rasp-is2-241/?date=2026-10-12");
+  assert.equal(Object.keys(JSON.parse(store.get("subs")).subs).length, 1);
+  await post("unsubscribe", { endpoint: sub.endpoint });
+  assert.equal(Object.keys(JSON.parse(store.get("subs")).subs).length, 0);
+}
+console.log("selfcheck push ok");

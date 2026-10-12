@@ -16,3 +16,6 @@ export function isProxyHost(hostname = globalThis.location?.hostname) {
 export function apiBase(hostname = globalThis.location?.hostname) {
   return isProxyHost(hostname) ? "./" : `${PAGES_ORIGIN}/`;
 }
+
+// Публичный VAPID-ключ для Web Push (приватный — секрет на Cloudflare).
+export const VAPID_PUBLIC = "BIPvIGO8-hPCdJ6ncfAigWTzdTPlKWVWTVUYpf0QnQ_rAHPYz7PcfdO2r7m32GfS7tuzgrfRBJWndg-Y0Haq9Vk";

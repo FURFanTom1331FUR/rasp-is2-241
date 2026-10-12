@@ -1,4 +1,12 @@
-# Cloudflare Pages. Отдельный Worker по-прежнему деплоится из папки worker/.
+# Cloudflare Pages. Отдельные Worker'ы деплоятся из папок worker/ (старый прокси) и push-worker/ (рассылка уведомлений).
 name = "rasp-is2-241"
 compatibility_date = "2026-09-01"
 pages_build_output_dir = "."
+
+# Подписки на уведомления (общие с push-worker). Приватный VAPID-ключ — секрет VAPID_PRIVATE.
+[[kv_namespaces]]
+binding = "PUSH_KV"
+id = "8baf498de48d4231ad3c6597c645303b"
+
+[vars]
+VAPID_PUBLIC = "BIPvIGO8-hPCdJ6ncfAigWTzdTPlKWVWTVUYpf0QnQ_rAHPYz7PcfdO2r7m32GfS7tuzgrfRBJWndg-Y0Haq9Vk"

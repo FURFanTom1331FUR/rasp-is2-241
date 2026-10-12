@@ -1,0 +1,16 @@
+# Рассылка уведомлений о парах: cron раз в минуту.
+# Деплой: cd push-worker && wrangler deploy ; секрет: wrangler secret put VAPID_PRIVATE
+name = "rasp-push"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "PUSH_KV"
+id = "8baf498de48d4231ad3c6597c645303b"
+
+[vars]
+VAPID_PUBLIC = "BIPvIGO8-hPCdJ6ncfAigWTzdTPlKWVWTVUYpf0QnQ_rAHPYz7PcfdO2r7m32GfS7tuzgrfRBJWndg-Y0Haq9Vk"

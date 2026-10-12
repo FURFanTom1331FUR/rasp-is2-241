@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v16";
+const SHELL = "rasp-shell-v17";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.
@@ -23,6 +23,8 @@ const FILES = [
   "./js/teachers.js",
   "./js/rooms.js",
   "./js/share.js",
+  "./js/push.js",
+  "./js/gestures.js",
   "./js/app.js",
   "./version.json",
   "./manifest.webmanifest",
@@ -50,6 +52,8 @@ const REQUIRED = [
   "./js/teachers.js",
   "./js/rooms.js",
   "./js/share.js",
+  "./js/push.js",
+  "./js/gestures.js",
 ];
 
 // /rooms — долгие ответы (сбор по корпусу), копию держит само приложение в localStorage.
@@ -491,7 +495,7 @@ async function proxyThenCache(request) {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   const path = url.pathname.replace(/\/$/, "") || "/";
-  if (API_PATHS.has(path)) return;
+  if (API_PATHS.has(path) || path.startsWith("/push/")) return;
   if (event.request.method !== "GET") return;
   if (isProxyRequest(url)) {
     event.respondWith(proxyThenCache(event.request));
@@ -509,4 +513,90 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   event.respondWith(cacheFirst(event.request));
+});
+
+// ===== Уведомления о парах (Web Push, v17) =====
+// Сервер (Worker rasp-push, cron раз в минуту) присылает зашифрованный JSON: { title, body, tag, url, date, kind }.
+// Последнее полученное уведомление пишем в кэш rasp-meta — страница показывает его в «Ещё» для диагностики.
+const META_CACHE = "rasp-meta";
+const PUSH_LOG = "/__rasp/push-log";
+
+async function logPush(entry) {
+  try {
+    const cache = await caches.open(META_CACHE);
+    await cache.put(PUSH_LOG, new Response(JSON.stringify(entry), { headers: { "Content-Type": "application/json" } }));
+  } catch {
+    /* диагностика не обязательна */
+  }
+}
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { title: "Пары", body: event.data ? event.data.text() : "" };
+  }
+  const title = data.title || "Пары";
+  const options = {
+    body: data.body || "",
+    tag: data.tag || "rasp-push",
+    renotify: true,
+    lang: "ru",
+    icon: new URL("./icons/icon-192.png", self.location.href).href,
+    badge: new URL("./icons/icon-192.png", self.location.href).href,
+    timestamp: Date.now(),
+    data: { url: data.url || new URL("./", self.location.href).href, date: data.date || "" },
+  };
+  event.waitUntil(
+    (async () => {
+      await self.registration.showNotification(title, options);
+      await logPush({ at: new Date().toISOString(), title, body: options.body, kind: data.kind || "pair", sentAt: data.sentAt || "" });
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of windows) client.postMessage({ type: "rasp-push", title, kind: data.kind || "pair" });
+    })(),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = event.notification.data?.url || new URL("./", self.location.href).href;
+  const date = event.notification.data?.date || "";
+  event.waitUntil(
+    (async () => {
+      const scope = new URL("./", self.location.href).href;
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const open = windows.find((client) => client.url.startsWith(scope));
+      if (open) {
+        await open.focus();
+        open.postMessage({ type: "rasp-open-date", date });
+        return;
+      }
+      // Адрес из уведомления — только в пределах приложения.
+      await self.clients.openWindow(target.startsWith(scope) ? target : `${scope}?date=${encodeURIComponent(date)}`);
+    })(),
+  );
+});
+
+// Браузер сменил подписку (истекла/обновилась) — переподписываемся и сообщаем серверу, настройки сохраняются.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    (async () => {
+      try {
+        const cache = await caches.open(META_CACHE);
+        const saved = await cache.match("/__rasp/push-settings");
+        if (!saved) return;
+        const { settings, publicKey, api } = await saved.json();
+        const options = event.oldSubscription?.options || { userVisibleOnly: true, applicationServerKey: publicKey };
+        const subscription = event.newSubscription || (await self.registration.pushManager.subscribe(options));
+        await fetch(`${api}push/subscribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ subscription: subscription.toJSON(), settings, oldEndpoint: event.oldSubscription?.endpoint || "" }),
+        });
+      } catch {
+        /* при следующем открытии приложение само проверит подписку */
+      }
+    })(),
+  );
 });

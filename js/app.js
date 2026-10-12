@@ -66,8 +66,23 @@ import {
   searchTeachers,
   toggleFavorite,
 } from "./teachers.js";
-import { PAIRS, buildingLabel, loadRoomsCache, pairAt, pairById, saveRoomsCache, sortBuildings, splitRooms } from "./rooms.js";
+import { PAIRS, buildingLabel, buildingOf, loadRoomsCache, pairAt, pairById, saveRoomsCache, sortBuildings, splitRooms } from "./rooms.js";
 import { canvasBlob, drawShareImage, shareFileName } from "./share.js";
+import {
+  LEAD_OPTIONS,
+  QUIET_OPTIONS,
+  currentSubscription,
+  lastPushReceived,
+  loadPushSettings,
+  permissionState,
+  pushSupport,
+  savePushSettings,
+  serverStatus,
+  subscribePush,
+  testPush,
+  unsubscribePush,
+} from "./push.js";
+import { attachGestures, haptic } from "./gestures.js";
 
 // Прокси (functions/schedule.js, functions/groups.js) ходит к kis.vgltu.ru.
 // На pages.dev — тот же домен, с зеркала GitHub Pages — https://rasp-is2-241.pages.dev.
@@ -86,7 +101,6 @@ const GROUPS_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const PREFETCH_EVERY_MS = 6 * 60 * 60 * 1000;
 const PREFETCH_GAP_MS = 1500;
 const DEFAULT_GROUP = "ИС2-241-ОБ";
-const LEAD_MS = 10 * 60 * 1000;
 
 const app = document.getElementById("app");
 
@@ -149,7 +163,20 @@ const state = {
     issue: "",
     open: "",
   },
+  push: {
+    settings: null,
+    permission: "default",
+    subscribed: false,
+    server: null,
+    received: null,
+    busy: false,
+    note: "",
+    checkedAt: 0,
+  },
+  actions: null,
+  scrollKey: "",
   share: {
+    date: "",
     open: false,
     source: "group",
     range: "today",
@@ -231,7 +258,7 @@ function phaseOf(iso, lesson) {
   return "";
 }
 
-function findNextLesson(record, now = new Date()) {
+function findNextLesson(record, now = new Date(), subgroup = state.subgroup) {
   if (!record?.days) return null;
   const today = moscowIso(now);
   const candidates = [];
@@ -239,7 +266,7 @@ function findNextLesson(record, now = new Date()) {
     const day = record.days.find((item) => item.date === iso);
     if (!day) continue;
     for (const lesson of day.lessons) {
-      if (!lessonMatchesSubgroup(lesson, state.subgroup)) continue;
+      if (!lessonMatchesSubgroup(lesson, subgroup)) continue;
       const start = moscowInstant(iso, lesson.start);
       if (start.getTime() > now.getTime()) candidates.push({ iso, lesson, start });
     }
@@ -248,10 +275,14 @@ function findNextLesson(record, now = new Date()) {
   return candidates[0] || null;
 }
 
+// Запасной вариант: напоминание, пока приложение открыто. Тег совпадает с серверным,
+// поэтому если пришло и то и другое — на телефоне останется одно уведомление.
 function planNotification(record) {
   clearTimeout(notifyTimer);
-  if (!loadNotify() || !("Notification" in window) || Notification.permission !== "granted" || !record) return;
-  const next = findNextLesson(record);
+  const push = loadPushSettings();
+  if (!(push.enabled || loadNotify()) || !("Notification" in window) || Notification.permission !== "granted" || !record) return;
+  const leadMs = (push.enabled ? push.lead : 10) * 60 * 1000;
+  const next = findNextLesson(record, new Date(), push.enabled && push.subgroup ? push.subgroup : state.subgroup);
   if (!next) return;
   const key = `${next.iso}|${next.lesson.time}|${next.lesson.subject}|${next.lesson.subgroup || ""}`;
   if (sessionStorage.getItem("rasp.notified") === key) return;
@@ -260,18 +291,26 @@ function planNotification(record) {
     const room = next.lesson.room ? ` · ${next.lesson.room}` : "";
     const badge = subgroupBadgeLabel(lessonSubgroup(next.lesson));
     const subgroup = badge ? ` · ${badge}` : "";
-    try {
-      new Notification("Скоро пара", {
-        body: `${formatDots(next.iso)} ${next.lesson.time} · ${next.lesson.subject}${subgroup}${room}`,
-        lang: "ru",
-        tag: "rasp-next",
-        icon: "./icons/icon-192.png",
-      });
-    } catch {
-      /* iOS и встроенные браузеры могут молча отказать. */
+    const title = `Через ${Math.round(leadMs / 60000)} мин: ${next.lesson.subject}`;
+    const options = {
+      body: `${next.lesson.time}${subgroup}${room}`,
+      lang: "ru",
+      tag: `pair-${next.iso}-${next.lesson.start}`,
+      renotify: false,
+      icon: "./icons/icon-192.png",
+      data: { url: `./?date=${next.iso}`, date: next.iso },
+    };
+    // На Android new Notification() запрещён — только через service worker.
+    if (swRegistration?.showNotification) swRegistration.showNotification(title, options).catch(() => {});
+    else {
+      try {
+        new Notification(title, options);
+      } catch {
+        /* iOS и встроенные браузеры могут молча отказать. */
+      }
     }
   };
-  const delay = next.start.getTime() - LEAD_MS - Date.now();
+  const delay = next.start.getTime() - leadMs - Date.now();
   if (delay <= 0 && next.start.getTime() > Date.now()) show();
   else if (delay > 0 && delay < 24 * 60 * 60 * 1000) notifyTimer = setTimeout(show, delay);
 }
@@ -480,10 +519,10 @@ function dateHero(iso) {
     kicker = `<p class="kicker warn">${kind} · сегодня ${esc(todayDots)}</p>`;
     back = `<button type="button" class="text-btn" data-action="go-today">К сегодня</button>`;
   }
-  let title = `<h1 class="hero-date">${esc(dots)}</h1>`;
+  let title = `<h1 class="hero-date"><button type="button" class="date-tap" data-action="pick-date" aria-label="Выбрать дату">${esc(dots)}<span class="date-tap-icon" aria-hidden="true">▾</span></button></h1>`;
   let sub = `<p class="weekday">${esc(weekdayName(iso))}</p>`;
   if (week && days.length > 1) {
-    title = `<h1 class="hero-date hero-range">${esc(formatDots(days[0]))} – ${esc(formatDots(days[days.length - 1]))}</h1>`;
+    title = `<h1 class="hero-date hero-range"><button type="button" class="date-tap" data-action="pick-date" aria-label="Выбрать дату">${esc(formatDots(days[0]))} – ${esc(formatDots(days[days.length - 1]))}<span class="date-tap-icon" aria-hidden="true">▾</span></button></h1>`;
     sub = `<p class="weekday">${esc(weekdayName(days[0]))} – ${esc(weekdayName(days[days.length - 1]))}</p>`;
   } else if (week && days.length === 1) {
     title = `<h1 class="hero-date">${esc(formatDots(days[0]))}</h1>`;
@@ -492,7 +531,8 @@ function dateHero(iso) {
     title = `<h1 class="hero-date hero-range">Неделя прошла</h1>`;
     sub = `<p class="weekday">Дни до сегодняшнего по Москве не показываем</p>`;
   }
-  return `<div class="hero">${kicker}${title}${sub}<div class="hero-actions">${back}<button type="button" class="text-btn share-link" data-action="share-open" data-source="group">Поделиться картинкой</button></div></div>`;
+  const quick = `<input class="quick-date" id="quick-date" type="date" value="${esc(iso)}" min="2020-01-01" max="2036-12-31" tabindex="-1" aria-hidden="true" data-quick-date />`;
+  return `<div class="hero">${kicker}${title}${quick}${sub}<div class="hero-actions">${back}<button type="button" class="text-btn share-link" data-action="share-open" data-source="group">Поделиться картинкой</button></div></div>`;
 }
 
 // «Фамилия И.О.» — ссылка на расписание преподавателя; «Вакансия…» и прочее — просто текст.
@@ -500,7 +540,7 @@ function looksLikeTeacher(name) {
   return /^[А-ЯЁ][А-Яа-яЁё'-]+(?:\s[А-ЯЁ][а-яё'-]+)?\s[А-ЯЁ]\.\s?(?:[А-ЯЁ]\.)?$/.test(String(name || "").trim());
 }
 
-function lessonCard(iso, lesson) {
+function lessonCard(iso, lesson, next = "", ring = false) {
   const phase = phaseOf(iso, lesson);
   const typeClass = lesson.type || "none";
   const badge = state.subgroup === "all" ? subgroupBadgeLabel(lessonSubgroup(lesson)) : "";
@@ -518,14 +558,38 @@ function lessonCard(iso, lesson) {
     if (bits.length) bits.push(`<span class="dot">·</span>`);
     bits.push(`<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a>`);
   }
-  return `<article class="card ${esc(typeClass)} ${phase}">
+  const index = dayByDate(iso)?.lessons.indexOf(lesson) ?? -1;
+  return `<article class="card ${esc(typeClass)} ${phase}${ring ? " next" : ""}" data-press="group" data-iso="${esc(iso)}" data-idx="${index}">
     <div class="card-top">
       <p class="time">${esc(lesson.start)}<span class="time-sep">–</span>${esc(lesson.end)}</p>
-      <div class="chips">${chips}</div>
+      <div class="chips">${chips}${next ? `<span class="chip next-chip">${esc(next)}</span>` : ""}</div>
     </div>
     <h2 class="subject">${esc(lesson.subject)}</h2>
     ${bits.length ? `<p class="meta-line">${bits.join("")}</p>` : ""}
+    ${phase === "now" ? `<div class="card-progress" style="--p:${progressOf(iso, lesson)}%"></div>` : ""}
   </article>`;
+}
+
+function progressOf(iso, lesson) {
+  const start = moscowInstant(iso, lesson.start).getTime();
+  const end = moscowInstant(iso, lesson.end).getTime();
+  return Math.max(0, Math.min(100, Math.round(((Date.now() - start) / (end - start)) * 100)));
+}
+
+function minutesUntil(iso, lesson) {
+  return Math.round((moscowInstant(iso, lesson.start).getTime() - Date.now()) / 60000);
+}
+
+function nextLabel(minutes) {
+  if (minutes <= 0) return "";
+  if (minutes < 60) return `через ${minutes} мин`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `через ${h} ч ${m} мин` : `через ${h} ч`;
+}
+
+function nowHHMM() {
+  return new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date());
 }
 
 function dayBody(iso) {
@@ -547,7 +611,18 @@ function dayBody(iso) {
     const label = state.subgroup === "1" || state.subgroup === "2" ? `${state.subgroup} пг` : "этой подгруппы";
     return `<div class="empty"><p class="empty-title">Нет пар для ${esc(label)}</p><p>В этот день есть только занятия другой подгруппы.</p></div>`;
   }
-  return lessons.map((lesson) => lessonCard(iso, lesson)).join("");
+  if (iso !== moscowIso()) return lessons.map((lesson) => lessonCard(iso, lesson)).join("");
+  // Сегодня: «сейчас» — полоса прогресса на текущей паре, иначе линия «сейчас» перед следующей.
+  const hasNow = lessons.some((lesson) => phaseOf(iso, lesson) === "now");
+  const nextIndex = lessons.findIndex((lesson) => phaseOf(iso, lesson) === "" && minutesUntil(iso, lesson) > 0);
+  const nowLine = `<div class="now-line" aria-label="Сейчас ${esc(nowHHMM())}"><span>сейчас ${esc(nowHHMM())}</span></div>`;
+  let out = "";
+  lessons.forEach((lesson, index) => {
+    if (!hasNow && index === nextIndex && index > 0) out += nowLine;
+    out += lessonCard(iso, lesson, index === nextIndex ? nextLabel(minutesUntil(iso, lesson)) : "", !hasNow && index === nextIndex);
+  });
+  if (!hasNow && nextIndex === -1 && lessons.length) out += `<div class="now-line done"><span>пары на сегодня закончились</span></div>`;
+  return out;
 }
 
 function dateControls(iso) {
@@ -808,7 +883,6 @@ function subgroupSwitch() {
 }
 
 function moreView() {
-  const notifyOn = loadNotify() && (typeof Notification === "undefined" || Notification.permission === "granted");
   return `<section class="more">
     <h1>Ещё</h1>
     <article class="block tool-block">
@@ -817,13 +891,7 @@ function moreView() {
       <button class="primary" type="button" data-action="mode" data-mode="rooms">Найти свободную аудиторию</button>
     </article>
     ${versionBlock()}
-    <article class="block">
-      <h2>Напоминание</h2>
-      <p>За 10 минут до следующей пары, пока приложение открыто. Если выбрана подгруппа, напоминание приходит только по общим парам и парам этой подгруппы. Отдельный сервер уведомлений не нужен. На iPhone напоминание ограничено системой.</p>
-      <p>${esc(state.notifyNote || (notifyOn ? "Напоминания включены." : "Сейчас выключены."))}</p>
-      <button class="primary" type="button" data-action="notify-on">Включить за 10 минут</button>
-      <button class="ghost" type="button" data-action="notify-off">Выключить</button>
-    </article>
+    ${notifyBlock()}
     <article class="block">
       <h2>На экран телефона</h2>
       <ol>
@@ -1145,13 +1213,15 @@ function teacherLessonCard(iso, lesson) {
     if (bits.length) bits.push(`<span class="dot">·</span>`);
     bits.push(`<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener">${esc(lesson.room)}</a>`);
   }
-  return `<article class="card ${esc(lesson.type || "none")} ${phase}">
+  const index = teacherDay(iso)?.lessons.indexOf(lesson) ?? -1;
+  return `<article class="card ${esc(lesson.type || "none")} ${phase}" data-press="teacher" data-iso="${esc(iso)}" data-idx="${index}">
     <div class="card-top">
       <p class="time">${esc(lesson.start)}<span class="time-sep">–</span>${esc(lesson.end)}</p>
       <div class="chips">${chips}</div>
     </div>
     <h2 class="subject">${esc(lesson.subject)}</h2>
     ${bits.length ? `<p class="meta-line">${bits.join("")}</p>` : ""}
+    ${phase === "now" ? `<div class="card-progress" style="--p:${progressOf(iso, lesson)}%"></div>` : ""}
   </article>`;
 }
 
@@ -1431,6 +1501,7 @@ function roomSheetHtml() {
 
 function shareDays(range, source) {
   const today = moscowIso();
+  if (range === "date" && state.share.date) return [state.share.date];
   if (range === "today") return [today];
   if (range === "tomorrow") return [addDays(today, 1)];
   let monday = source === "teacher" ? state.teacher.week || mondayOf(today) : mondayOf(today);
@@ -1458,7 +1529,7 @@ function shareModel(source, range) {
   });
   // Неделя: пустую субботу без данных не рисуем.
   const trimmed = range === "week" ? days.filter((day, index) => index < 5 || day.lessons?.length) : days;
-  const rangeLabel = range === "week" ? `${formatDots(isos[0])} – ${formatDots(isos[isos.length - 1])}` : range === "today" ? `Сегодня, ${formatDots(isos[0])}` : `Завтра, ${formatDots(isos[0])}`;
+  const rangeLabel = range === "week" ? `${formatDots(isos[0])} – ${formatDots(isos[isos.length - 1])}` : range === "today" ? `Сегодня, ${formatDots(isos[0])}` : range === "tomorrow" ? `Завтра, ${formatDots(isos[0])}` : `${weekdayName(isos[0])}, ${formatDots(isos[0])}`;
   const sub = !isTeacher && state.subgroup !== "all" ? ` · ${state.subgroup} подгруппа` : "";
   const record = isTeacher ? state.teacher.record : state.record;
   return {
@@ -1505,6 +1576,8 @@ function shareSheetHtml() {
     ["tomorrow", "Завтра"],
     ["week", "Неделя"],
   ];
+  const today = moscowIso();
+  if (sh.date && sh.date !== today && sh.date !== addDays(today, 1)) ranges.unshift(["date", formatDots(sh.date).slice(0, 5)]);
   const native = canShareFile(sh.file);
   return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="share-title">
     <div class="sheet-card share-card">
@@ -1521,11 +1594,15 @@ function shareSheetHtml() {
   </div>`;
 }
 
-function openShare(source) {
+function openShare(source, date = "") {
   const sh = state.share;
   sh.open = true;
+  sh.date = date || (state.mode === "day" ? activeIso() : "");
   sh.source = source === "teacher" ? "teacher" : "group";
-  sh.range = state.mode === "week" ? "week" : state.mode === "tomorrow" ? "tomorrow" : source === "teacher" ? "week" : "today";
+  const today = moscowIso();
+  sh.range = date
+    ? date === today ? "today" : date === addDays(today, 1) ? "tomorrow" : "date"
+    : state.mode === "week" ? "week" : state.mode === "tomorrow" ? "tomorrow" : source === "teacher" ? "week" : state.mode === "day" && sh.date !== today ? "date" : "today";
   sh.url = "";
   sh.file = null;
   render();
@@ -1558,6 +1635,411 @@ function downloadShare() {
   render();
 }
 
+// ===== Уведомления о парах (Web Push) =====
+
+function pushSettings() {
+  if (!state.push.settings) state.push.settings = loadPushSettings();
+  return state.push.settings;
+}
+
+function stampShort(iso) {
+  if (!iso) return "";
+  try {
+    return formatStamp(iso);
+  } catch {
+    return iso;
+  }
+}
+
+function permissionLabel(value) {
+  return { granted: "разрешены", denied: "запрещены в браузере", default: "ещё не спрашивали", unsupported: "браузер не умеет" }[value] || value;
+}
+
+function notifyTips(support) {
+  const browser = support.yandex ? "Яндекс Браузер" : "Chrome";
+  return `<details class="tips">
+      <summary>Не приходят? Советы для Android${support.honor ? " / HONOR" : ""}</summary>
+      <ol>
+        <li>Разрешите уведомления браузеру: Настройки телефона → Приложения → ${esc(browser)} → Уведомления → включить (и категорию «Сайты»).</li>
+        <li>Если в браузере уведомления сайта запрещены: откройте ${esc(location.host)}, нажмите на значок слева от адреса → Уведомления → «Разрешить».</li>
+        <li>HONOR / Huawei: Настройки → Приложения → ${esc(browser)} → «Запуск приложений» → «Управлять вручную» и включите «Автозапуск», «Косвенный запуск», «Работа в фоне».</li>
+        <li>Батарея: Настройки → Батарея → Оптимизация (или «Ещё настройки батареи») — для ${esc(browser)} «Не оптимизировать». Иначе система усыпляет браузер, и уведомления опаздывают или приходят пачкой.</li>
+        <li>VPN: уведомления идут через сервис Google (Chrome) или браузера, обычно VPN не мешает. Если с VPN не приходят, а без него приходят — добавьте браузер в исключения VPN.</li>
+        <li>${support.yandex ? "Яндекс Браузер на Android не ставит сайты как отдельное приложение (только ярлык), и в фоне его чаще усыпляют. Надёжнее всего — Chrome: откройте rasp-is2-241.pages.dev в Chrome → ⋮ → «Установить приложение» → включите уведомления там." : "Лучше всего уведомления работают в приложении, установленном из Chrome: ⋮ → «Установить приложение»."}</li>
+        <li>Нажмите «Прислать тестовое». Если тестовое пришло при закрытом приложении — напоминания о парах тоже придут.</li>
+      </ol>
+    </details>`;
+}
+
+function notifyBlock() {
+  const p = state.push;
+  const settings = pushSettings();
+  const support = pushSupport();
+  const permission = permissionState();
+  const can = support.sw && support.push && support.notification;
+  const subgroup = settings.subgroup || state.subgroup || "all";
+  const seg = (action, current, items) =>
+    `<div class="seg seg-wrap">${items
+      .map(([value, label]) => `<button type="button" data-action="${action}" data-value="${esc(value)}" aria-pressed="${String(value) === String(current) ? "true" : "false"}">${esc(label)}</button>`)
+      .join("")}</div>`;
+  const server = p.server;
+  const serverLine = !settings.enabled
+    ? "—"
+    : !p.subscribed
+      ? "в браузере подписки нет"
+      : !server
+        ? "проверяем…"
+        : server.ok === false
+          ? "нет связи с сервером"
+          : server.subscribed
+            ? `сохранена${server.updatedAt ? ` ${stampShort(server.updatedAt)}` : ""}`
+            : "не найдена — выключите и включите ещё раз";
+  const lastSent = server?.last ? `${stampShort(server.last.at)} — ${server.last.status >= 200 && server.last.status < 300 ? "доставлено в сервис" : `ошибка ${server.last.status}`}` : "ещё не было";
+  const received = p.received ? `${stampShort(p.received.at)} — ${p.received.title}` : "ещё не было";
+  const warn = !can
+    ? `<p class="notify-warn">Этот браузер не поддерживает push-уведомления${support.ios ? " (на iPhone — только если приложение добавлено на экран «Домой», iOS 16.4+)" : ""}. Пока приложение открыто, напоминание всё равно покажется.</p>`
+    : permission === "denied"
+      ? `<p class="notify-warn">Уведомления для этого сайта запрещены. Нажмите на значок слева от адреса → Уведомления → «Разрешить», затем включите переключатель.</p>`
+      : support.yandex
+        ? `<p class="notify-hint">Яндекс Браузер поддерживает уведомления сайтов, но в фоне Android его часто усыпляет. Если тестовое не приходит при закрытом браузере — используйте Chrome (советы ниже).</p>`
+        : "";
+  return `<article class="block notify-block" id="notify">
+      <div class="notify-head">
+        <h2>Уведомления о парах</h2>
+        <button type="button" class="switch" role="switch" data-action="push-toggle" aria-checked="${settings.enabled ? "true" : "false"}" aria-label="Уведомления о парах" ${p.busy || !can ? "disabled" : ""}><span></span></button>
+      </div>
+      <p>Приходят с сервера, даже когда приложение закрыто: пара, время, аудитория, преподаватель.</p>
+      ${warn}
+      <p class="field-label">За сколько минут до пары</p>
+      ${seg("push-lead", settings.lead, LEAD_OPTIONS.map((value) => [value, `${value}`]))}
+      <p class="field-label">Подгруппа</p>
+      ${seg("push-subgroup", subgroup, [["all", "Все"], ["1", "1 пг"], ["2", "2 пг"]])}
+      <p class="field-label">Не беспокоить</p>
+      ${seg("push-quiet", settings.quiet, QUIET_OPTIONS)}
+      <button type="button" class="check-row" role="switch" data-action="push-first" aria-checked="${settings.firstOnly ? "true" : "false"}"><span class="check-box" aria-hidden="true">${settings.firstOnly ? "✓" : ""}</span>Только первая пара дня</button>
+      <button class="ghost" type="button" data-action="push-test" ${settings.enabled && p.subscribed && !p.busy ? "" : "disabled"}>Прислать тестовое</button>
+      ${p.note ? `<p class="status notify-note" role="status">${esc(p.note)}</p>` : ""}
+      <dl class="diag">
+        <dt>Группа</dt><dd>${esc(state.group || "не выбрана")}</dd>
+        <dt>Разрешение</dt><dd>${esc(permissionLabel(permission))}</dd>
+        <dt>Подписка в браузере</dt><dd>${p.subscribed ? "есть" : "нет"}</dd>
+        <dt>На сервере</dt><dd>${esc(serverLine)}</dd>
+        <dt>Последнее по расписанию</dt><dd>${esc(lastSent)}</dd>
+        <dt>Последнее полученное</dt><dd>${esc(received)}</dd>
+        <dt>Браузер</dt><dd>${esc(support.yandex ? "Яндекс Браузер" : /Chrome/.test(navigator.userAgent) ? "Chrome" : "другой")}${support.standalone ? ", установлено как приложение" : ", вкладка браузера"}</dd>
+      </dl>
+      ${notifyTips(support)}
+    </article>`;
+}
+
+async function refreshPushStatus(withServer = true) {
+  const p = state.push;
+  p.permission = permissionState();
+  const registration = swRegistration || (await navigator.serviceWorker?.getRegistration?.().catch(() => null));
+  const subscription = await currentSubscription(registration);
+  p.subscribed = Boolean(subscription);
+  p.received = await lastPushReceived();
+  if (state.mode === "more") render();
+  if (withServer && subscription && navigator.onLine) {
+    p.server = await serverStatus(registration, API_BASE);
+    p.checkedAt = Date.now();
+    if (state.mode === "more") render();
+  }
+}
+
+async function pushRegistration() {
+  if (swRegistration) return swRegistration;
+  if (!navigator.serviceWorker) return null;
+  try {
+    return await Promise.race([navigator.serviceWorker.ready, sleep(8000).then(() => null)]);
+  } catch {
+    return null;
+  }
+}
+
+async function enablePush() {
+  const p = state.push;
+  const settings = pushSettings();
+  if (!state.group) {
+    p.note = "Сначала выберите группу.";
+    render();
+    return;
+  }
+  p.busy = true;
+  p.note = "Включаем…";
+  render();
+  const registration = await pushRegistration();
+  if (!settings.subgroup) settings.subgroup = state.subgroup || "all";
+  const result = await subscribePush(registration, API_BASE, settings, state.group, state.subgroup);
+  p.busy = false;
+  if (result.ok) {
+    settings.enabled = true;
+    settings.syncedAt = new Date().toISOString();
+    savePushSettings(settings);
+    saveNotify(false);
+    p.note = `Готово: напомним за ${settings.lead} мин до пары. Нажмите «Прислать тестовое», чтобы проверить.`;
+    haptic(12);
+  } else {
+    settings.enabled = false;
+    savePushSettings(settings);
+    p.note = {
+      denied: "Уведомления запрещены. Нажмите на значок слева от адреса → Уведомления → «Разрешить».",
+      dismissed: "Разрешение не дали — окно закрыли. Нажмите ещё раз и выберите «Разрешить».",
+      unsupported: "Этот браузер не умеет показывать уведомления.",
+      "no-push": "Браузер не поддерживает push. Попробуйте Chrome.",
+      "subscribe-failed": `Браузер не смог оформить подписку (${result.detail || "ошибка"}). ${pushSupport().yandex ? "В Яндекс Браузере это бывает — попробуйте Chrome." : "Проверьте, что на телефоне работают сервисы Google Play."}`,
+      server: `Подписка есть, но сервер её не принял: ${result.detail || "нет связи"}. Попробуйте ещё раз.`,
+    }[result.reason] || "Не получилось включить.";
+  }
+  render();
+  refreshPushStatus();
+  planNotification(state.record);
+}
+
+async function disablePush() {
+  const p = state.push;
+  const settings = pushSettings();
+  p.busy = true;
+  render();
+  await unsubscribePush(await pushRegistration(), API_BASE);
+  settings.enabled = false;
+  savePushSettings(settings);
+  saveNotify(false);
+  p.busy = false;
+  p.server = null;
+  p.note = "Уведомления выключены.";
+  clearTimeout(notifyTimer);
+  render();
+  refreshPushStatus(false);
+}
+
+let pushSyncTimer = 0;
+function syncPushSettings() {
+  const settings = pushSettings();
+  savePushSettings(settings);
+  render();
+  planNotification(state.record);
+  if (!settings.enabled) return;
+  clearTimeout(pushSyncTimer);
+  pushSyncTimer = setTimeout(async () => {
+    const result = await subscribePush(await pushRegistration(), API_BASE, settings, state.group, state.subgroup);
+    if (result.ok) {
+      settings.syncedAt = new Date().toISOString();
+      savePushSettings(settings);
+    }
+    state.push.note = result.ok ? "Настройки сохранены на сервере." : "Не удалось сохранить настройки на сервере — попробуем при следующем открытии.";
+    if (state.mode === "more") render();
+    refreshPushStatus();
+  }, 600);
+}
+
+async function sendTestPush() {
+  const p = state.push;
+  p.busy = true;
+  p.note = "Отправляем тестовое…";
+  render();
+  const result = await testPush(await pushRegistration(), API_BASE, pushSettings(), state.group, state.subgroup);
+  p.busy = false;
+  p.note = result.ok
+    ? "Сервер отправил тестовое — оно должно появиться в шторке через пару секунд. Не пришло — смотрите советы ниже."
+    : result.reason === "no-subscription"
+      ? "Подписки нет — выключите и включите уведомления."
+      : `Не отправилось: ${result.message || result.status}.`;
+  render();
+  setTimeout(() => refreshPushStatus(false), 4000);
+}
+
+// Подписка могла пропасть (сброс данных, новый браузер) или устареть — проверяем при запуске.
+// Старые напоминания (v16 и раньше, «пока открыто») переводим на сервер, если разрешение уже дано.
+async function verifyPushOnBoot() {
+  const settings = pushSettings();
+  const legacy = loadNotify() && permissionState() === "granted";
+  if ((!settings.enabled && !legacy) || permissionState() !== "granted") return;
+  const registration = await pushRegistration();
+  const subscription = await currentSubscription(registration);
+  const stale = !settings.syncedAt || Date.now() - Date.parse(settings.syncedAt) > 3 * 24 * 60 * 60 * 1000;
+  if (subscription && !legacy && !stale) return;
+  if (!navigator.onLine || !state.group) return;
+  if (!settings.subgroup) settings.subgroup = state.subgroup || "all";
+  const result = await subscribePush(registration, API_BASE, settings, state.group, state.subgroup);
+  if (result.ok) {
+    settings.enabled = true;
+    settings.syncedAt = new Date().toISOString();
+    savePushSettings(settings);
+    saveNotify(false);
+  }
+}
+
+// ===== Быстрые действия по долгому нажатию на пару =====
+
+function lessonFromCard(card) {
+  const iso = card.dataset.iso;
+  const index = Number(card.dataset.idx);
+  const source = card.dataset.press;
+  const day = source === "teacher" ? teacherDay(iso) : dayByDate(iso);
+  const lesson = day?.lessons?.[index];
+  return lesson ? { iso, lesson, source } : null;
+}
+
+function pairOfLesson(lesson) {
+  const found = PAIRS.find(([, start]) => start === lesson.start);
+  return found ? found[0] : 1;
+}
+
+function lessonText(iso, lesson) {
+  return [
+    `${weekdayName(iso)}, ${formatDots(iso)}`,
+    `${lesson.start}–${lesson.end} ${lesson.type ? `(${lesson.type}) ` : ""}${lesson.subject}`,
+    [lesson.room, lesson.teacher, (lesson.groups || []).join(", ")].filter(Boolean).join(" · "),
+  ].join("\n");
+}
+
+function actionsSheetHtml() {
+  const { iso, lesson, source } = state.actions;
+  const teacher = source === "group" && looksLikeTeacher(lesson.teacher) ? lesson.teacher : "";
+  const building = lesson.room ? buildingOf(lesson.room) : "";
+  return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="actions-title">
+    <div class="sheet-card actions-card">
+      <div class="grabber"></div>
+      <p class="lead">${esc(weekdayName(iso))}, ${esc(formatDots(iso))} · ${esc(lesson.start)}–${esc(lesson.end)}</p>
+      <h2 id="actions-title">${esc(lesson.subject)}</h2>
+      <div class="action-list">
+        <button type="button" data-action="act-share-day"><span aria-hidden="true">🖼</span> Картинка этого дня</button>
+        <button type="button" data-action="act-copy"><span aria-hidden="true">📋</span> Скопировать пару</button>
+        ${teacher ? `<button type="button" data-action="act-teacher"><span aria-hidden="true">👤</span> Расписание: ${esc(teacher)}</button>` : ""}
+        ${building ? `<button type="button" data-action="act-room"><span aria-hidden="true">🚪</span> Аудитория ${esc(lesson.room)}: занятость за день</button>` : ""}
+        ${lesson.room ? `<a href="https://kis.vgltu.ru/map/rasp?auditory=${encodeURIComponent(lesson.room)}" target="_blank" rel="noopener"><span aria-hidden="true">🗺</span> ${esc(lesson.room)} на карте ВГЛТУ</a>` : ""}
+      </div>
+      <button class="primary" type="button" data-action="act-close">Закрыть</button>
+    </div>
+  </div>`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openRoomFromLesson(iso, lesson) {
+  const r = state.rooms;
+  r.building = buildingOf(lesson.room);
+  r.date = iso;
+  r.pair = pairOfLesson(lesson);
+  state.mode = "rooms";
+  render();
+  window.scrollTo?.(0, 0);
+  loadBuildings().then(async () => {
+    await loadRooms();
+    state.rooms.open = lesson.room;
+    if (state.mode === "rooms") render();
+  });
+}
+
+// ===== Навигация: свайпы, быстрый выбор даты, «к сегодня», автопрокрутка =====
+
+function setDay(iso) {
+  const today = moscowIso();
+  state.follow = iso === today ? "today" : "none";
+  state.anchor = iso === today ? null : iso;
+  if (state.mode !== "week") state.mode = iso === today ? "today" : "day";
+  state.dateError = "";
+  render();
+  if (state.mode === "week") ensureWeek();
+  else if (!dayByDate(iso)) refresh(iso, true);
+}
+
+function swipe(direction) {
+  const delta = direction === "left" ? 1 : -1;
+  if (state.share.open || state.pickerOpen || state.actions || state.rooms.open) return false;
+  let moved = false;
+  if (["today", "tomorrow", "day"].includes(state.mode) && state.group) {
+    setDay(addDays(activeIso(), delta));
+    moved = true;
+  } else if (state.mode === "week" && state.group) {
+    const monday = addDays(mondayOf(activeIso()), delta * 7);
+    if (delta < 0 && monday < mondayOf(moscowIso())) return false;
+    const today = moscowIso();
+    state.follow = monday <= today ? "today" : "none";
+    state.anchor = monday <= today ? null : monday;
+    render();
+    ensureWeek();
+    moved = true;
+  } else if (state.mode === "teachers" && state.teacher.name && !state.teacher.picking) {
+    state.teacher.week = addDays(state.teacher.week, delta * 7);
+    render();
+    loadTeacherWeek(state.teacher.week);
+    moved = true;
+  } else if (state.mode === "rooms") {
+    state.rooms.date = addDays(state.rooms.date, delta);
+    loadRooms();
+    moved = true;
+  }
+  if (moved) app.querySelector("main")?.classList.add(direction === "left" ? "slide-left" : "slide-right");
+  return moved;
+}
+
+function pullRefresh() {
+  if (state.mode === "teachers" && state.teacher.name) loadTeacherWeek(state.teacher.week, true);
+  else if (state.mode === "rooms") loadRooms(true);
+  else if (state.mode === "attendance") {
+    if (state.attendance.session) refreshAttendance();
+  } else if (state.mode === "more") {
+    checkForUpdate(true);
+    refreshPushStatus();
+  } else if (state.group) {
+    const days = visibleWeekDays(activeIso(), moscowIso());
+    refresh(state.mode === "week" && days.length ? days[0] : activeIso(), true);
+  }
+}
+
+function todayFab() {
+  if (state.share.open || state.pickerOpen || state.actions) return "";
+  const today = moscowIso();
+  if (["day", "tomorrow"].includes(state.mode) && state.group && activeIso() !== today) {
+    return `<button type="button" class="fab" data-action="go-today">↺ Сегодня</button>`;
+  }
+  if (state.mode === "week" && state.group && mondayOf(activeIso()) !== mondayOf(today)) {
+    return `<button type="button" class="fab" data-action="week-now">↺ Эта неделя</button>`;
+  }
+  if (state.mode === "teachers" && state.teacher.name && !state.teacher.picking && state.teacher.week !== mondayOf(today)) {
+    return `<button type="button" class="fab" data-action="teacher-week" data-delta="0">↺ Эта неделя</button>`;
+  }
+  if (state.mode === "rooms" && state.rooms.date && state.rooms.date !== today) {
+    return `<button type="button" class="fab" data-action="rooms-today">↺ Сегодня</button>`;
+  }
+  return "";
+}
+
+// Один раз при открытии «Сегодня»/недели: прокрутить к текущей или следующей паре.
+function autoScroll() {
+  if (!["today", "week"].includes(state.mode) && !(state.mode === "teachers" && state.teacher.name)) return;
+  const key = `${state.mode}|${moscowIso()}|${state.mode === "teachers" ? state.teacher.name : state.group}`;
+  if (state.scrollKey === key) return;
+  const target = app.querySelector(".card.now") || app.querySelector(".card.next");
+  if (!target) return;
+  state.scrollKey = key;
+  const rect = target.getBoundingClientRect();
+  if (rect.top > window.innerHeight * 0.62 || rect.top < 0) {
+    window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - window.innerHeight * 0.3), behavior: "smooth" });
+  }
+}
+
+const LAST_MODE_KEY = "rasp.lastMode";
+let modeRestored = false;
+function rememberMode() {
+  if (!modeRestored) return;
+  try {
+    const section = navSection();
+    localStorage.setItem(LAST_MODE_KEY, ["attendance", "teachers", "more"].includes(section) ? section : "schedule");
+  } catch {
+    /* приватный режим */
+  }
+}
+
 function render() {
   document.title = state.group ? `Пары · ${state.group}` : "Пары";
   const offline = navigator.onLine ? "" : `<p class="offline-flag">Нет сети</p>`;
@@ -1588,7 +2070,11 @@ function render() {
     ${updateBanner()}
     ${state.pickerOpen ? pickerHtml() : ""}
     ${state.rooms.open && state.mode === "rooms" ? roomSheetHtml() : ""}
-    ${state.share.open ? shareSheetHtml() : ""}`;
+    ${state.share.open ? shareSheetHtml() : ""}
+    ${state.actions ? actionsSheetHtml() : ""}
+    ${todayFab()}`;
+  rememberMode();
+  requestAnimationFrame(autoScroll);
 }
 
 function ensure(iso) {
@@ -1644,26 +2130,7 @@ async function commitGroup(raw) {
   state.seenToday = moscowIso();
   render();
   refresh(moscowIso(), true);
-}
-
-async function enableNotify() {
-  if (!("Notification" in window)) {
-    state.notifyNote = "Этот браузер не умеет показывать уведомления.";
-    render();
-    return;
-  }
-  let permission = Notification.permission;
-  if (permission !== "granted") permission = await Notification.requestPermission();
-  if (permission !== "granted") {
-    saveNotify(false);
-    state.notifyNote = "Разрешение не дали. Напоминания выключены, расписание работает как обычно.";
-    render();
-    return;
-  }
-  saveNotify(true);
-  state.notifyNote = "Напомним за 10 минут до пары, пока приложение открыто.";
-  planNotification(state.record);
-  render();
+  if (pushSettings().enabled) syncPushSettings();
 }
 
 function tick() {
@@ -1673,8 +2140,18 @@ function tick() {
   if (changed) {
     render();
     if (state.group) refresh(activeIso(), true);
-  }
+  } else if (liveViewNeedsTick()) render();
   planNotification(state.record);
+}
+
+// «Сейчас», «через N мин» и полоса прогресса обновляются раз в 30 секунд, если не мешаем вводу.
+function liveViewNeedsTick() {
+  if (document.hidden || state.share.open || state.pickerOpen || state.actions || state.rooms.open) return false;
+  const active = document.activeElement;
+  if (active && app.contains(active) && active.matches("input, select, textarea")) return false;
+  if (["today", "week"].includes(state.mode) && state.group) return true;
+  if (state.mode === "day" && activeIso() === moscowIso()) return true;
+  return state.mode === "teachers" && state.teacher.name && !state.teacher.picking && state.teacher.week === mondayOf(moscowIso());
 }
 
 app.addEventListener("click", (event) => {
@@ -1718,6 +2195,7 @@ app.addEventListener("click", (event) => {
     } else {
       state.mode = "more";
       render();
+      refreshPushStatus();
     }
   } else if (action === "pick-teacher" || action === "open-teacher") openTeacher(button.dataset.teacher);
   else if (action === "rooms-building") {
@@ -1821,13 +2299,76 @@ app.addEventListener("click", (event) => {
     render();
   } else if (action === "check-update") checkForUpdate(true);
   else if (action === "reset-app") resetApp();
-  else if (action === "notify-on") enableNotify();
-  else if (action === "notify-off") {
-    saveNotify(false);
-    clearTimeout(notifyTimer);
-    state.notifyNote = "Напоминания выключены.";
+  else if (action === "push-toggle") {
+    if (pushSettings().enabled) disablePush();
+    else enablePush();
+  } else if (action === "push-lead") {
+    pushSettings().lead = Number(button.dataset.value);
+    syncPushSettings();
+  } else if (action === "push-subgroup") {
+    pushSettings().subgroup = button.dataset.value;
+    syncPushSettings();
+  } else if (action === "push-quiet") {
+    pushSettings().quiet = button.dataset.value;
+    syncPushSettings();
+  } else if (action === "push-first") {
+    pushSettings().firstOnly = !pushSettings().firstOnly;
+    syncPushSettings();
+  } else if (action === "push-test") sendTestPush();
+  else if (action === "pick-date") {
+    const input = document.getElementById("quick-date");
+    try {
+      if (input?.showPicker) input.showPicker();
+      else throw new Error("no picker");
+    } catch {
+      document.querySelector("[data-date-form]")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      document.getElementById("day")?.focus();
+    }
+  } else if (action === "week-now") {
+    state.follow = "today";
+    state.anchor = null;
+    render();
+    ensureWeek();
+  } else if (action === "rooms-today") {
+    state.rooms.date = moscowIso();
+    loadRooms();
+  } else if (action === "act-close") {
+    state.actions = null;
+    render();
+  } else if (action === "act-copy") {
+    const { iso, lesson } = state.actions;
+    copyText(lessonText(iso, lesson)).then((ok) => {
+      state.actions = null;
+      render();
+      if (!ok) window.prompt("Скопируйте:", lessonText(iso, lesson).replace(/\n/g, " · "));
+    });
+  } else if (action === "act-share-day") {
+    const { iso, source } = state.actions;
+    state.actions = null;
+    openShare(source, iso);
+  } else if (action === "act-teacher") {
+    const { lesson } = state.actions;
+    state.actions = null;
+    openTeacher(lesson.teacher);
+  } else if (action === "act-room") {
+    const { iso, lesson } = state.actions;
+    state.actions = null;
+    openRoomFromLesson(iso, lesson);
+
     render();
   }
+});
+
+app.addEventListener("change", (event) => {
+  if (!event.target.matches?.("[data-quick-date]")) return;
+  const iso = event.target.value;
+  if (!isValidIso(iso)) return;
+  if (state.mode === "week") {
+    state.follow = iso <= moscowIso() ? "today" : "none";
+    state.anchor = iso <= moscowIso() ? null : iso;
+    render();
+    ensureWeek();
+  } else setDay(iso);
 });
 
 app.addEventListener("input", (event) => {
@@ -2109,6 +2650,14 @@ function watchServiceWorker() {
     refreshUpdateUi();
   });
   navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "rasp-push") {
+      refreshPushStatus(false);
+      return;
+    }
+    if (event.data?.type === "rasp-open-date") {
+      openDateFromLink(event.data.date);
+      return;
+    }
     if (event.data?.type !== "rasp-shell" || !hadController) return;
     if (event.data.version === `rasp-shell-v${APP_VERSION}`) return;
     state.update.activated = true;
@@ -2123,6 +2672,7 @@ function watchServiceWorker() {
     syncWaiting();
     if (state.mode === "more" || state.update.waiting) refreshUpdateUi();
     checkForUpdate(false);
+    verifyPushOnBoot().catch(() => {});
   }).catch(() => {});
 }
 
@@ -2277,6 +2827,40 @@ async function resetApp() {
   location.replace(`./?reset=${Date.now()}`);
 }
 
+// ?date=ГГГГ-ММ-ДД — из уведомления: открыть этот день расписания.
+function openDateFromLink(iso) {
+  if (!isValidIso(iso || "") || !state.group) return false;
+  state.actions = null;
+  state.share.open = false;
+  state.mode = "today";
+  setDay(iso);
+  window.scrollTo?.(0, 0);
+  return true;
+}
+
+function restoreLastMode() {
+  let saved = "";
+  try {
+    saved = localStorage.getItem(LAST_MODE_KEY) || "";
+  } catch {
+    saved = "";
+  }
+  if (saved === "teachers") {
+    state.mode = "teachers";
+    render();
+    ensureTeacherList();
+    if (state.teacher.name) loadTeacherWeek(state.teacher.week || mondayOf(moscowIso()));
+  } else if (saved === "attendance") {
+    state.mode = "attendance";
+    render();
+    if (state.attendance.session && navigator.onLine) refreshAttendance();
+  } else if (saved === "more") {
+    state.mode = "more";
+    render();
+    refreshPushStatus();
+  }
+}
+
 function boot() {
   // Старые версии (до 23.09) хранили адрес Worker на workers.dev — он больше не нужен.
   try {
@@ -2316,6 +2900,24 @@ function boot() {
   }
   refreshGroups();
   if (state.group) refresh(moscowIso(), true);
+  const params = new URLSearchParams(location.search);
+  const linked = params.get("date");
+  if (linked) {
+    history.replaceState(null, "", location.pathname);
+    if (!openDateFromLink(linked)) restoreLastMode();
+  } else if (state.group) restoreLastMode();
+  modeRestored = true;
+  rememberMode();
+  attachGestures(app, {
+    onSwipe: swipe,
+    onRefresh: pullRefresh,
+    onLongPress: (card) => {
+      const found = lessonFromCard(card);
+      if (!found) return;
+      state.actions = found;
+      render();
+    },
+  });
   planNotification(state.record);
   setInterval(tick, 30000);
   setTimeout(prefetchRecent, 8000);

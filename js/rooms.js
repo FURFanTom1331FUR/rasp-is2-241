@@ -21,6 +21,16 @@ const LABELS = {
   ОБД: "ОБД",
 };
 
+// «207Пр/АПП» → «АПП», «110Л/11к комп» → «11к» (как на сервере, functions/_rooms.js).
+export function buildingOf(room) {
+  const text = String(room || "");
+  const slash = text.lastIndexOf("/");
+  if (slash < 0) return "";
+  let key = text.slice(slash + 1).trim().split(/\s+/)[0] || "";
+  if (/^\d+кор$/i.test(key)) key = key.replace(/кор$/i, "к");
+  return key;
+}
+
 export function buildingLabel(key) {
   if (LABELS[key]) return LABELS[key];
   const match = /^(\d+)к$/i.exec(key);
