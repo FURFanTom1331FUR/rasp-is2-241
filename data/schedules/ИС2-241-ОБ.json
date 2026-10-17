@@ -1,6 +1,6 @@
 {
   "group": "ИС2-241-ОБ",
-  "fetchedAt": "2026-10-15T07:37:51+03:00",
+  "fetchedAt": "2026-10-17T07:24:55+03:00",
   "source": "https://kis.vgltu.ru/schedule",
   "origin": "snapshot",
   "range": {
@@ -1590,7 +1590,7 @@
           "type": "лаб",
           "subject": "Разработка мобильных приложений",
           "subgroup": "2 п.г.",
-          "room": "220Комп/7к",
+          "room": "109Комп/7к",
           "teacher": "Ильин Е.С.",
           "groups": [
             "ИС2-241-ОБ"
