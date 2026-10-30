@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: update-schedule
@@ -69,6 +70,13 @@ jobs:
           git commit -m "Расписание: обновление данных $(TZ=Europe/Moscow date +%Y-%m-%d)"
           git push
           echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN commits do not automatically trigger the branch-based Pages build.
+      - name: Обновить зеркало GitHub Pages после ночного коммита
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/pages/builds"
 
       # Проект Cloudflare Pages выкладывается через Direct Upload (без Git-интеграции).
       # Без секрета CLOUDFLARE_API_TOKEN шаг пропускается, данные попадут на сайт со следующим деплоем.
