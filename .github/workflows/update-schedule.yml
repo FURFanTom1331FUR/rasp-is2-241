@@ -24,6 +24,8 @@ jobs:
       HAS_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -37,6 +39,7 @@ jobs:
         run: |
           node scripts/selfcheck.mjs
           node scripts/check-bundles.mjs
+          node scripts/check-sw-update.mjs
           python3 scripts/check_bundle_builder.py
 
       - uses: actions/cache/restore@v4
@@ -86,6 +89,21 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler@4 pages deploy . --project-name rasp-is2-241 --branch main --commit-dirty=true
+
+      - name: Проверить опубликованную версию и оба пакета
+        if: (github.event_name == 'push' || steps.commit.outputs.changed == 'true') && env.HAS_CF_TOKEN == 'true'
+        run: node scripts/verify-release.mjs
+
+      - name: Оформить выпуск v19 после проверки production
+        if: github.event_name == 'push' && env.HAS_CF_TOKEN == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(node -p "JSON.parse(require('fs').readFileSync('version.json')).version")" = "19" ]; then
+            if ! gh release view v19 > /dev/null 2>&1; then
+              gh release create v19 --target "$GITHUB_SHA" --title "v19 — Исправлены баги версии 18" --notes-file .github/release-v19.md
+            fi
+          fi
 
       - name: Сообщить об отсутствии доступа к Cloudflare
         if: env.HAS_CF_TOKEN != 'true'
