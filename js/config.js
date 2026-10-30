@@ -2,9 +2,17 @@
 // Пароль студента сюда не кладётся.
 export const WORKER_URL = "";
 
-// Прокси расписания и входа живёт только на Cloudflare Pages (functions/).
-// Зеркало на GitHub Pages и любые другие адреса ходят туда напрямую (CORS).
+// Прокси расписания живёт на Cloudflare Pages (functions/).
+// Посещаемость выбирает доступный сервер из отдельного списка ниже.
 export const PAGES_ORIGIN = "https://rasp-is2-241.pages.dev";
+
+// Existing university-session proxies owned by this project (repository history).
+// Credentials may only go to these fixed HTTPS origins, never a discovered URL.
+export const ATTENDANCE_ORIGINS = [
+  "https://rasp-attendance.integrall1331.workers.dev",
+  "https://rasp-attendance.harsh-raft.workers.dev",
+  PAGES_ORIGIN,
+];
 
 export function isProxyHost(hostname = globalThis.location?.hostname) {
   const host = String(hostname || "").toLowerCase();

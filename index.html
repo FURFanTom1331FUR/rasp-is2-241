@@ -15,6 +15,19 @@
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
     <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+    <script>
+      // Apply saved appearance before CSS/first paint; no network font or module required.
+      try {
+        var theme = localStorage.getItem("rasp.theme");
+        if (["light", "dark", "forest"].includes(theme)) {
+          document.documentElement.dataset.theme = theme;
+          document.querySelectorAll('meta[name="theme-color"]').forEach(function(meta) {
+            meta.removeAttribute("media");
+            meta.content = {light: "#f4f0e8", dark: "#141816", forest: "#162d23"}[theme];
+          });
+        }
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="./css/app.css" />
   </head>
   <body>

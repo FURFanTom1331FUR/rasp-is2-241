@@ -18,11 +18,13 @@
   --prac: #8d4e16;
   --danger: #8d2f2f;
   --rail: var(--accent);
+  --on-accent: #f7fff9;
+  --on-accent-muted: #d7efe0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     color-scheme: dark;
     --bg: #141816;
     --bg-deep: #0d100e;
@@ -41,8 +43,67 @@
     --lab: #9fd0ee;
     --prac: #f0b27a;
     --danger: #f0b0b0;
+
+    --on-accent: #102117;
+    --on-accent-muted: #183e29;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
   }
 }
+
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #141816;
+    --bg-deep: #0d100e;
+    --card: #1d2320;
+    --ink: #f4f1ea;
+    --muted: #b1b8b0;
+    --line: #2d3530;
+    --accent: #8ed4ae;
+    --accent-ink: #d9f6e6;
+    --accent-soft: #24362c;
+    --sunken: #171c19;
+    --nav: rgba(20, 24, 22, 0.9);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 14px 32px rgba(0, 0, 0, 0.28);
+    --warn-bg: #3a2c1c;
+    --warn: #f3c48a;
+    --lab: #9fd0ee;
+    --prac: #f0b27a;
+    --danger: #f0b0b0;
+
+    --on-accent: #102117;
+    --on-accent-muted: #183e29;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+:root[data-theme="forest"] {
+  color-scheme: dark;
+  --bg: #162d23;
+  --bg-deep: #0e2018;
+  --card: #213c2f;
+  --ink: #f7efdc;
+  --muted: #c4cbb5;
+  --line: #3d5846;
+  --accent: #b8d68d;
+  --accent-ink: #e8f2ca;
+  --accent-soft: #304c35;
+  --sunken: #12261b;
+  --nav: rgba(22, 45, 35, 0.94);
+  --shadow: 0 1px 2px rgba(0, 12, 3, 0.3), 0 14px 32px rgba(0, 12, 3, 0.26);
+  --warn-bg: #4a3a20;
+  --warn: #f7d69a;
+  --lab: #add7d4;
+  --prac: #f0c18e;
+  --danger: #ffb9ad;
+  --on-accent: #19351f;
+  --on-accent-muted: #29422c;
+  font-family: "Trebuchet MS", "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+:root[data-theme="forest"] :is(h1, h2, .brand, .subject) {
+  font-family: Georgia, "Noto Serif", serif;
+}
+
+.theme-options { margin-top: 12px; }
 
 * { box-sizing: border-box; }
 
@@ -262,7 +323,7 @@ a { color: var(--accent-ink); }
 .chip.лек { background: var(--accent-soft); color: var(--accent-ink); }
 .chip.лаб { background: color-mix(in srgb, var(--lab) 16%, var(--card)); color: var(--lab); }
 .chip.пр { background: var(--warn-bg); color: var(--prac); }
-.chip.now { background: var(--accent); color: var(--card); }
+.chip.now { background: var(--accent); color: var(--on-accent); }
 .chip.subgroup {
   background: transparent;
   color: var(--accent-ink);
@@ -440,7 +501,7 @@ label.field select {
   font-weight: 700;
 }
 
-.primary { background: var(--accent); color: #f7fff9; }
+.primary { background: var(--accent); color: var(--on-accent); }
 .ghost, .text-btn {
   background: var(--card);
   color: var(--accent-ink);
@@ -664,7 +725,7 @@ label.field select {
   background: var(--sunken);
   font-weight: 700;
 }
-.seg button[aria-pressed="true"] { background: var(--accent); color: #f7fff9; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
 .student-name {
   margin: 2px 0 8px;
   font-size: 1.35rem;
@@ -793,11 +854,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   100% { background-position: 0 0; }
 }
 
-@media (prefers-color-scheme: dark) {
-  .primary { color: #102117; }
-  .chip.now { color: #102117; }
-  .seg button[aria-pressed="true"] { color: #102117; }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .progress, .skeleton { animation: none; }
@@ -867,8 +923,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   font-size: 0.9rem;
 }
 .chip-scroll button small { color: var(--muted); font-size: 0.72rem; font-weight: 650; }
-.chip-scroll button[aria-pressed="true"] { background: var(--accent); color: #f7fff9; }
-.chip-scroll button[aria-pressed="true"] small { color: #d7efe0; }
+.chip-scroll button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+.chip-scroll button[aria-pressed="true"] small { color: var(--on-accent-muted); }
 .rooms-date { margin: 6px 0 4px; }
 .rooms-pair-time { margin: 2px 2px 10px; color: var(--muted); font-weight: 700; font-size: 0.9rem; }
 .progress.inline { position: static; margin: 0 0 10px; }
@@ -989,7 +1045,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border: 0;
   border-radius: 999px;
   background: var(--accent);
-  color: #f7fff9;
+  color: var(--on-accent);
   font: inherit;
   font-weight: 800;
   box-shadow: 0 8px 24px rgba(20, 50, 35, 0.28);
@@ -1100,7 +1156,7 @@ main.slide-right { animation: slide-r 0.2s ease-out; }
   height: 24px;
   border-radius: 7px;
   border: 2px solid var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 0.85rem;
 }
 .check-row[aria-checked="true"] .check-box { background: var(--accent); }
