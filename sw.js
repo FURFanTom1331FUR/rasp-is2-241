@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v17";
+const SHELL = "rasp-shell-v18";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 // С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
 // для них worker включается сразу, как раньше.
@@ -16,6 +16,7 @@ const FILES = [
   "./js/dates.js",
   "./js/parse.js",
   "./js/store.js",
+  "./js/bundles.js",
   "./js/config.js",
   "./js/attendance.js",
   "./js/net.js",
@@ -45,6 +46,7 @@ const REQUIRED = [
   "./js/net.js",
   "./js/attendance.js",
   "./js/store.js",
+  "./js/bundles.js",
   "./js/dates.js",
   "./js/parse.js",
   "./js/config.js",
@@ -504,6 +506,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   // version.json — только сеть: по нему приложение узнаёт о новой версии.
   if (url.pathname === VERSION_PATH) return;
+  // Bundles have their own validated, bounded cache managed by the app.
+  if (url.pathname.includes("/data/bundles/")) return;
   if (isDataRequest(url)) {
     event.respondWith(networkThenCache(event.request));
     return;
