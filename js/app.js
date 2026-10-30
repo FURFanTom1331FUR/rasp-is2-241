@@ -1001,10 +1001,10 @@ function versionBlock() {
       <h2>Приложение</h2>
       <p>Версия ${APP_VERSION} от ${esc(formatDots(APP_DATE))}.</p>
       <button class="ghost" type="button" data-action="check-update" ${update.checking ? "disabled" : ""}>Проверить обновления</button>
+      <button class="ghost" type="button" data-action="repair-app" ${update.repairing ? "disabled" : ""}>${update.repairing ? "Скачиваем файлы…" : "Восстановить файлы приложения"}</button>
+      <p class="status">Повторно скачает файлы приложения. Расписания, посещаемость и настройки сохранятся.</p>
       ${newer ? `<button class="primary" type="button" data-action="apply-update">Обновить до версии ${update.available.version}</button>` : ""}
       ${note ? `<p class="status" role="status">${esc(note)}</p>` : ""}
-      <p>Если приложение ведёт себя как старая версия — сбросьте его: кэш и вход в кабинет сотрутся, расписание скачается заново.</p>
-      <button class="ghost" type="button" data-action="reset-app">Сбросить приложение</button>
     </article>`;
 }
 
@@ -2287,7 +2287,7 @@ app.addEventListener("click", (event) => {
     state.update.justUpdated = false;
     render();
   } else if (action === "check-update") checkForUpdate(true);
-  else if (action === "reset-app") resetApp();
+  else if (action === "repair-app") repairApp();
   else if (action === "push-toggle") {
     if (pushSettings().enabled) disablePush();
     else enablePush();
@@ -2438,7 +2438,7 @@ function noteFirstRunOfVersion() {
 }
 
 async function fetchRemoteVersion() {
-  const response = await fetchText(`./version.json?t=${Date.now()}`, { cache: "no-store" }, 8000);
+  const response = await fetchText(`./version.json?t=${Date.now()}`, { cache: "no-store" }, 4000);
   if (!response.ok) return null;
   return normalizeVersionInfo(JSON.parse(response.text));
 }
@@ -2482,7 +2482,7 @@ async function checkForUpdate(manual = false) {
   const update = state.update;
   if (update.checking) return;
   lastUpdateCheck = Date.now();
-  update.checking = manual;
+  update.checking = true;
   if (manual) {
     update.note = "";
     render();
@@ -2490,7 +2490,8 @@ async function checkForUpdate(manual = false) {
   let remote = null;
   let reached = false;
   try {
-    await swRegistration?.update();
+    // A slow SW download must not block the independent version probe/UI.
+    if (navigator.onLine) Promise.resolve(swRegistration?.update()).catch(() => {});
   } catch {
     /* sw.js недоступен — проверим по version.json. */
   }
@@ -2513,6 +2514,35 @@ async function checkForUpdate(manual = false) {
     }
   }
   refreshUpdateUi();
+}
+
+async function repairApp() {
+  const update = state.update;
+  if (update.repairing) return;
+  const controller = navigator.serviceWorker?.controller;
+  if (!navigator.onLine || !controller) {
+    update.note = "Для восстановления подключитесь к интернету и откройте приложение ещё раз. Сохранённые данные остаются на месте.";
+    render(); return;
+  }
+  update.repairing = true;
+  update.note = "Скачиваем и проверяем файлы приложения…";
+  render();
+  try {
+    const ok = await new Promise(resolve => {
+      const channel = new MessageChannel();
+      const finish = value => { clearTimeout(timer); channel.port1.close(); resolve(value); };
+      const timer = setTimeout(() => finish(false), 20000);
+      channel.port1.onmessage = event => finish(event.data?.ok === true);
+      controller.postMessage({ type: "repair-shell" }, [channel.port2]);
+    });
+    if (!ok) throw new Error('Repair failed');
+    location.reload();
+  } catch {
+    update.note = "Не удалось восстановить файлы. Рабочая копия и личные данные сохранены. Повторите при устойчивом интернете.";
+  } finally {
+    update.repairing = false;
+    render();
+  }
 }
 
 function reloadOnce(reason) {
@@ -2788,32 +2818,6 @@ async function signOutAttendance() {
   state.attendance.loading = false;
   state.attendance.error = "";
   render();
-}
-
-// Полный сброс: старые service worker'ы, кэши, старый адрес Worker и сессия кабинета.
-// Выбранная группа и копии расписания в localStorage остаются.
-async function resetApp() {
-  if (!confirm("Сбросить приложение? Кэш и вход в кабинет сотрутся, затем страница перезагрузится.")) return;
-  try {
-    const registrations = (await navigator.serviceWorker?.getRegistrations?.()) || [];
-    await Promise.all(registrations.map((registration) => registration.unregister()));
-  } catch {
-    /* нет service worker */
-  }
-  try {
-    const keys = await caches.keys();
-    await Promise.all(keys.map((key) => caches.delete(key)));
-  } catch {
-    /* нет Cache Storage */
-  }
-  for (const key of ["rasp.workerUrl", "rasp.attendance.session", "rasp.attendance.snapshot"]) {
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      /* приватный режим */
-    }
-  }
-  location.replace(`./?reset=${Date.now()}`);
 }
 
 // ?date=ГГГГ-ММ-ДД — из уведомления: открыть этот день расписания.

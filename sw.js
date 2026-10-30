@@ -1,13 +1,10 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v18";
+const SHELL = "rasp-shell-v19";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
-// С этой версии новый worker ждёт кнопку «Обновить». Старые (до 11) страницы о ней не знают —
-// для них worker включается сразу, как раньше.
-const UPDATER_SINCE = 11;
 const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
 const PROXY_TIMEOUT_MS = 10000;
-const UPDATE_TIMEOUT_MS = 30000;
+const UPDATE_TIMEOUT_MS = 8000;
 
 const FILES = [
   "./",
@@ -175,11 +172,6 @@ async function fetchBuffered(url, ms, init = {}) {
   }
 }
 
-function shellVersion(name) {
-  const match = /^rasp-shell-v(\d+)$/.exec(name);
-  return match ? Number(match[1]) : 0;
-}
-
 async function previousShells() {
   const keys = await caches.keys();
   return keys.filter((key) => key.startsWith("rasp-shell-") && key !== SHELL);
@@ -196,6 +188,9 @@ async function copyPreviousEntries(cache, overwriteProxy = false) {
       requests.map(async (request) => {
         const url = new URL(request.url);
         const path = url.pathname;
+        // Never fill holes in a new shell with old JavaScript/HTML. A failed
+        // cache write must leave the old worker active, not label old code new.
+        if (!isDataRequest(url) && !isProxyRequest(url) && !path.includes('/icons/')) return;
         const targets = [request];
         if (path.endsWith("/index.html")) targets.push(indexUrl());
         if (path.endsWith("/") || path.endsWith("/index.html")) targets.push(rootUrl());
@@ -229,9 +224,11 @@ async function hasDocument(cache) {
 // На медленной сети (или когда провайдер душит Cloudflare) файл может не скачаться с первого раза.
 async function loadFresh(fresh, path) {
   const url = new URL(path, self.location.href).href;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await fetchBuffered(url, UPDATE_TIMEOUT_MS);
+      const freshUrl = new URL(url);
+      freshUrl.searchParams.set('shell', String(SW_VERSION));
+      const response = await fetchBuffered(freshUrl.href, UPDATE_TIMEOUT_MS);
       if (response && response.status === 200) {
         fresh.set(path, response);
         return;
@@ -243,10 +240,11 @@ async function loadFresh(fresh, path) {
 }
 
 async function storeFresh(cache, path, response) {
-  if (!response) return;
+  if (!response) return false;
   const url = new URL(path, self.location.href).href;
-  await store(cache, url, response.clone());
-  if (path === "./" || path === "./index.html") await store(cache, rootUrl(), response.clone());
+  if (!(await store(cache, url, response.clone()))) return false;
+  if (path === "./" || path === "./index.html") return store(cache, rootUrl(), response.clone());
+  return true;
 }
 
 async function freshVersion(fresh) {
@@ -262,8 +260,9 @@ async function freshVersion(fresh) {
 // (или CDN отдал старые файлы), этот worker её не подхватит — для неё будет свой worker.
 async function precache(cache) {
   const fresh = new Map();
-  const pending = new Map(FILES.map((path) => [path, loadFresh(fresh, path)]));
-  await Promise.all(["./", "./index.html", "./version.json", ...REQUIRED].map((path) => pending.get(path)));
+  const core = FILES.filter(path => !path.startsWith('./data/') && !path.startsWith('./icons/'));
+  const pending = new Map(core.map((path) => [path, loadFresh(fresh, path)]));
+  await Promise.all([...pending.values()]);
   const codeReady =
     (fresh.has("./") || fresh.has("./index.html")) &&
     REQUIRED.every((path) => fresh.has(path)) &&
@@ -271,12 +270,25 @@ async function precache(cache) {
   if (codeReady) {
     const shellPaths = FILES.filter((path) => !path.startsWith("./data/") && !path.startsWith("./icons/"));
     const ordered = shellPaths.filter((path) => path !== "./").concat("./");
-    for (const path of ordered) await storeFresh(cache, path, fresh.get(path));
+    for (const path of ordered) {
+      if (!(await storeFresh(cache, path, fresh.get(path)))) return false;
+    }
   }
-  await Promise.all([...pending.values()]);
-  const extras = FILES.filter((path) => path.startsWith("./data/") || path.startsWith("./icons/") || path.endsWith(".webmanifest"));
-  for (const path of extras) await storeFresh(cache, path, fresh.get(path));
   return codeReady;
+}
+
+// Optional data cannot hold a new worker in "installing" for minutes.
+// Navigations warm it in the background; installed users retain their copies.
+async function cacheExtras(cache) {
+  const fresh = new Map();
+  const extras = FILES.filter((path) => path.startsWith("./data/") || path.startsWith("./icons/") || path.endsWith(".webmanifest"));
+  await Promise.all(extras.map(async path => {
+    try {
+      const response = await fetchBuffered(new URL(path, self.location.href).href, 2000);
+      if (response?.status === 200) fresh.set(path, response);
+    } catch { /* Optional data never blocks the next activation for minutes. */ }
+  }));
+  for (const path of extras) await storeFresh(cache, path, fresh.get(path));
 }
 
 let shellRefresh = null;
@@ -286,7 +298,8 @@ function refreshShell() {
     shellRefresh = (async () => {
       try {
         const cache = await caches.open(SHELL);
-        await precache(cache);
+        if (!(await hasDocument(cache))) await precache(cache);
+        await cacheExtras(cache);
       } catch {
         /* Фоновое обновление оболочки необязательно для текущего экрана. */
       } finally {
@@ -338,20 +351,16 @@ async function dropOlderSchedules(cache, url) {
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
-      const previous = await previousShells();
-      const updating = Boolean(self.registration.active);
-      const legacy = previous.length > 0 && Math.max(...previous.map(shellVersion)) < UPDATER_SINCE;
       const cache = await caches.open(SHELL);
       await purgeBadData(SHELL);
       await purgeBadData(DATA_CACHE);
       const ready = await precache(cache);
       // Обновление без полного свежего кода не ставим: старая версия работает дальше,
       // браузер попробует снова при следующей проверке.
-      if (!ready && (updating || !(await hasDocument(cache)))) throw new Error("fresh shell not cached");
+      if (!ready) throw new Error("fresh shell not cached");
       await copyPreviousEntries(cache);
       // С v14 новая версия включается сразу: раньше она ждала кнопку «Обновить», и телефоны
       // неделями сидели на старом коде. Страница сама перезагрузится по controllerchange.
-      void legacy;
       await self.skipWaiting();
     })(),
   );
@@ -362,7 +371,28 @@ self.addEventListener("message", (event) => {
   const type = event.data?.type;
   if (type === "skip-waiting") event.waitUntil(self.skipWaiting());
   else if (type === "version") event.source?.postMessage({ type: "rasp-version", version: SW_VERSION });
+  else if (type === "repair-shell") event.waitUntil(repairShell(event.ports?.[0]));
 });
+
+async function repairShell(port) {
+  const scratch = `rasp-repair-v${SW_VERSION}`;
+  try {
+    const fresh = await caches.open(scratch);
+    if (!(await precache(fresh))) throw new Error('Fresh files unavailable');
+    const cache = await caches.open(SHELL);
+    // Only after a complete verified download, replace same-version shell files.
+    // Never delete the working shell, schedule caches, or localStorage.
+    for (const request of await fresh.keys()) {
+      const response = await fresh.match(request);
+      await cache.put(request, response);
+    }
+    port?.postMessage({ ok: true });
+  } catch {
+    port?.postMessage({ ok: false });
+  } finally {
+    await caches.delete(scratch);
+  }
+}
 
 self.addEventListener("activate", (event) => {
   // Не ждать сеть: пока activate не завершится, Chrome не отдаёт fetch,
