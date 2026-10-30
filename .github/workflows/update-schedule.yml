@@ -40,6 +40,7 @@ jobs:
           node scripts/selfcheck.mjs
           node scripts/check-bundles.mjs
           node scripts/check-sw-update.mjs
+          node scripts/check-attendance-route.mjs
           python3 scripts/check_bundle_builder.py
 
       - uses: actions/cache/restore@v4
@@ -94,14 +95,16 @@ jobs:
         if: (github.event_name == 'push' || steps.commit.outputs.changed == 'true') && env.HAS_CF_TOKEN == 'true'
         run: node scripts/verify-release.mjs
 
-      - name: Оформить выпуск v19 после проверки production
+      - name: Оформить выпуск после проверки production
         if: github.event_name == 'push' && env.HAS_CF_TOKEN == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$(node -p "JSON.parse(require('fs').readFileSync('version.json')).version")" = "19" ]; then
-            if ! gh release view v19 > /dev/null 2>&1; then
-              gh release create v19 --target "$GITHUB_SHA" --title "v19 — Исправлены баги версии 18" --notes-file .github/release-v19.md
+          version="$(node -p "JSON.parse(require('fs').readFileSync('version.json')).version")"
+          notes=".github/release-v${version}.md"
+          if [ -f "$notes" ]; then
+            if ! gh release view "v$version" > /dev/null 2>&1; then
+              gh release create "v$version" --target "$GITHUB_SHA" --title "v$version — $(head -n 1 "$notes")" --notes-file "$notes"
             fi
           fi
 

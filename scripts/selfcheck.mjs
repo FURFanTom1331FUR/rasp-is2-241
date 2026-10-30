@@ -454,7 +454,8 @@ console.log("selfcheck ok");
   const slow = withTimeout((input, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))), 50);
   await assert.rejects(slow("https://vgltu.ru/lc/"), (error) => error instanceof UpstreamTimeout);
   const { ATTENDANCE_SLOW_MESSAGE } = await import("../js/attendance.js");
-  assert.ok(ATTENDANCE_SLOW_MESSAGE.includes("долго"));
+  assert.ok(ATTENDANCE_SLOW_MESSAGE.includes("18 секунд"));
+  assert.ok(!/белыми|Wi.?Fi/.test(ATTENDANCE_SLOW_MESSAGE));
 }
 console.log("selfcheck timeouts ok");
 

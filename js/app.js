@@ -806,7 +806,7 @@ function attendanceBlock() {
           <input name="password" type="password" autocomplete="current-password" required />
         </label>
         ${state.attendance.error ? `<p class="date-error">${esc(state.attendance.error)}</p>` : ""}
-        <button class="primary" type="submit">${state.attendance.loading ? "Входим…" : "Войти"}</button>
+        <button class="primary" type="submit" ${state.attendance.loading ? "disabled" : ""}>${state.attendance.loading ? "Входим…" : "Войти"}</button>
       </form>
       <p><a href="https://vgltu.ru/lc/attendance" target="_blank" rel="noopener">Открыть посещаемость на vgltu.ru</a></p>
     </article>
@@ -873,6 +873,7 @@ function subgroupSwitch() {
 function moreView() {
   return `<section class="more">
     <h1>Ещё</h1>
+    ${themeBlock()}
     <article class="block tool-block">
       <h2>Свободные аудитории</h2>
       <p>Какие аудитории корпуса свободны на нужной паре — по официальному расписанию ВГЛТУ.</p>
@@ -896,6 +897,29 @@ function moreView() {
       <p><a href="https://vgltu.ru/obuchayushchimsya/raspisanie-zanyatij/interaktivnoe-raspisanie/" target="_blank" rel="noopener">Официальное интерактивное расписание</a></p>
     </article>
   </section>`;
+}
+
+function activeTheme() {
+  return document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+}
+
+function themeBlock() {
+  return `<article class="block"><h2>Оформление</h2>
+    <p>Тема сохраняется на этом устройстве и работает без сети.</p>
+    <div class="seg theme-options" role="group" aria-label="Оформление">${[['light', 'Светлая'], ['dark', 'Тёмная'], ['forest', 'Лес']].map(([value, label]) =>
+      `<button type="button" data-action="theme" data-theme="${value}" aria-pressed="${activeTheme() === value}">${label}</button>`).join('')}</div>
+  </article>`;
+}
+
+function changeTheme(value) {
+  if (!['light', 'dark', 'forest'].includes(value)) return;
+  document.documentElement.dataset.theme = value;
+  try { localStorage.setItem('rasp.theme', value); } catch { /* Current session still applies. */ }
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.removeAttribute('media');
+    meta.content = { light: '#f4f0e8', dark: '#141816', forest: '#162d23' }[value];
+  }
+  render();
 }
 
 function suggestHtml(query) {
@@ -2146,6 +2170,7 @@ app.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
+  if (action === 'theme') { changeTheme(button.dataset.theme); return; }
   if (action === "subgroup") {
     const next = saveSubgroup(button.dataset.subgroup);
     if (next === state.subgroup) return;
@@ -2722,6 +2747,8 @@ function applyAttendanceDates() {
 }
 
 async function submitAttendance(form) {
+  if (state.attendance.loading) return;
+  const requestId = ++attendanceToken;
   const login = form.login.value.trim();
   const password = form.password.value;
   form.password.value = "";
@@ -2736,11 +2763,13 @@ async function submitAttendance(form) {
   render();
   try {
     const result = await loginAttendance(worker, login, password);
+    if (requestId !== attendanceToken) return;
     saveSession({ login: result.login, token: result.token, name: result.name, savedAt: new Date().toISOString() });
     state.attendance.session = loadSession();
     state.attendance.loading = false;
     await refreshAttendance();
   } catch (error) {
+    if (requestId !== attendanceToken) return;
     state.attendance.loading = false;
     state.attendance.error = asAttendanceError(error).message || "Не удалось войти";
     if (state.mode === "attendance") render();

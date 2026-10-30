@@ -1,5 +1,5 @@
 // Версия: при выпуске поднять здесь, в js/version.js и version.json (см. README).
-const SHELL = "rasp-shell-v19";
+const SHELL = "rasp-shell-v20";
 const SW_VERSION = Number(SHELL.slice("rasp-shell-v".length));
 const DATA_CACHE = "rasp-data-v1";
 const DATA_TIMEOUT_MS = 4000;
@@ -16,6 +16,7 @@ const FILES = [
   "./js/bundles.js",
   "./js/config.js",
   "./js/attendance.js",
+  "./js/attendance-route.js",
   "./js/net.js",
   "./js/version.js",
   "./js/teachers.js",
@@ -42,6 +43,7 @@ const REQUIRED = [
   "./js/app.js",
   "./js/net.js",
   "./js/attendance.js",
+  "./js/attendance-route.js",
   "./js/store.js",
   "./js/bundles.js",
   "./js/dates.js",

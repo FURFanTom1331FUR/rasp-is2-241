@@ -1,5 +1,6 @@
 import { PAGES_ORIGIN, WORKER_URL, isProxyHost } from "./config.js";
 import { fetchText } from "./net.js";
+import { attendanceRoute, forgetAttendanceRoute } from './attendance-route.js';
 
 const SESSION_KEY = "rasp.attendance.session";
 const SNAPSHOT_KEY = "rasp.attendance.snapshot";
@@ -14,18 +15,18 @@ export class AttendanceError extends Error {
 }
 
 export const ATTENDANCE_NETWORK_MESSAGE =
-  "Нет связи с сервером посещаемости (rasp-is2-241.pages.dev). Проверьте интернет и попробуйте ещё раз. На мобильном интернете с «белыми списками» сайт может не открываться — попробуйте через Wi‑Fi.";
+  "Не удалось подключиться к серверу посещаемости. Причину ограничения сети определить не удалось. Сохранённые данные не удалены; попробуйте повторить позже.";
 
-// Вход и журнал — это несколько запросов к vgltu.ru подряд через прокси, из России
-// они легко идут дольше 5 секунд общего таймаута. Ждём дольше и пишем честно, что медленно.
-export const ATTENDANCE_TIMEOUT_MS = 30000;
+// Server selection has a separate short deadline. Bound the entire response,
+// including its body, without guessing whether the network or university is slow.
+export const ATTENDANCE_TIMEOUT_MS = 18000;
 export const ATTENDANCE_SLOW_MESSAGE =
-  "Кабинет ВГЛТУ (vgltu.ru) слишком долго не отвечает. Попробуйте ещё раз через минуту.";
+  "Ответ сервера посещаемости не получен за 18 секунд. Это может быть соединение с сервером или ожидание кабинета ВГЛТУ. Сохранённая сессия не удалена.";
 
 async function attendanceFetch(input, init) {
   const started = Date.now();
   try {
-    return await fetchText(input, init, ATTENDANCE_TIMEOUT_MS);
+    return await fetchText(input, { ...init, cache: 'no-store', credentials: 'omit', redirect: 'error' }, ATTENDANCE_TIMEOUT_MS);
   } catch (error) {
     if (String(error?.name) === "AbortError" && Date.now() - started >= ATTENDANCE_TIMEOUT_MS - 100) {
       throw new AttendanceError(ATTENDANCE_SLOW_MESSAGE, "timeout");
@@ -35,19 +36,20 @@ async function attendanceFetch(input, init) {
 }
 
 export const ATTENDANCE_BLOCKED_MESSAGE =
-  "Сайт приложения (rasp-is2-241.pages.dev) сейчас не открывается из вашей сети — расписание показано из памяти. На мобильном интернете с «белыми списками» вход не работает: подключитесь к Wi‑Fi и попробуйте снова.";
+  "Не удалось подключиться ни к одному серверу посещаемости за 2,5 секунды. Пароль не отправлен. Доступность расписания офлайн не означает доступность входа в кабинет.";
 
-// Сеть упала на входе/журнале: проверяем, открывается ли сам сайт, чтобы сказать точнее.
+// A failed transport invalidates only the route, never the university session.
 async function explainNetwork(workerUrl, error) {
   const wrapped = asAttendanceError(error);
   if (wrapped.code !== "network") return wrapped;
-  try {
-    const probe = await fetchText(`${workerUrl}/version.json?t=${Date.now()}`, { cache: "no-store" }, 6000);
-    if (probe.ok) return wrapped;
-  } catch {
-    /* сайт тоже не отвечает */
-  }
-  return new AttendanceError(ATTENDANCE_BLOCKED_MESSAGE, "network");
+  forgetAttendanceRoute(workerUrl);
+  return wrapped;
+}
+
+async function reachableWorker(primary) {
+  if (globalThis.navigator?.onLine === false) throw new AttendanceError('Нет сети. Для входа нужна связь с сервером; сохранённые данные доступны офлайн.', 'network');
+  try { return await attendanceRoute(primary); }
+  catch { throw new AttendanceError(ATTENDANCE_BLOCKED_MESSAGE, 'unreachable'); }
 }
 
 export function asAttendanceError(error) {
@@ -213,6 +215,7 @@ function parseJson(text) {
 }
 
 export async function loginAttendance(workerUrl, login, password) {
+  workerUrl = await reachableWorker(workerUrl);
   try {
     const response = await attendanceFetch(`${workerUrl}/login`, {
       method: "POST",
@@ -220,7 +223,7 @@ export async function loginAttendance(workerUrl, login, password) {
       body: JSON.stringify({ login, password }),
     });
     const json = parseJson(response.text);
-    if (!response.ok || !json?.ok || !json.token) {
+    if (!response.ok || !json?.ok || !/^[A-Za-z0-9]{8,128}$/.test(json.token || '')) {
       throw new AttendanceError(json?.error || "Не удалось войти", response.status === 401 ? "denied" : "failed");
     }
     return { login: String(json.login || login), token: String(json.token), name: cleanStudentName(json.name) };
@@ -230,6 +233,7 @@ export async function loginAttendance(workerUrl, login, password) {
 }
 
 export async function fetchAttendance(workerUrl, token, from, to, options = {}) {
+  workerUrl = await reachableWorker(workerUrl);
   try {
     const url = new URL(`${workerUrl}/attendance`);
     url.searchParams.set("from", from);
@@ -239,7 +243,7 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
       headers: { Accept: "application/json", "X-Vgltu-Session": token },
     });
     const json = parseJson(response.text);
-    if (response.status === 401) {
+    if (response.status === 401 && json?.ok === false) {
       throw new AttendanceError(json?.error || "Сессия истекла. Войдите снова.", "unauthorized");
     }
     if (!response.ok || !json?.ok) {
@@ -257,6 +261,7 @@ export async function fetchAttendance(workerUrl, token, from, to, options = {}) 
 
 export async function logoutAttendance(workerUrl, token) {
   try {
+    workerUrl = await reachableWorker(workerUrl);
     await fetchText(`${workerUrl}/logout`, {
       method: "POST",
       headers: { Accept: "application/json", "X-Vgltu-Session": token },
