@@ -1,3 +1,4 @@
+import { initBundles, syncBundles, bundledRecord, bundleStatus } from './bundles.js';
 import {
   asAttendanceError,
   configuredWorkerUrl,
@@ -44,6 +45,7 @@ import {
   loadRecord,
   loadSubgroup,
   mergeRecords,
+  pruneGroupHistory,
   readCachedRecord,
   rememberRecent,
   saveGroup,
@@ -95,11 +97,9 @@ const ROOMS_BUILDING_KEY = "rasp.roomsBuilding";
 const ROOMS_LIST_KEY = "rasp.roomsBuildings";
 const TEACHERS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TEACHER_FRESH_MS = 45 * 60 * 1000;
-const LIVE_WINDOWS = 2;
+const LIVE_WINDOWS = 1;
 const LIVE_TIMEOUT_MS = 12000;
 const GROUPS_MAX_AGE_MS = 12 * 60 * 60 * 1000;
-const PREFETCH_EVERY_MS = 6 * 60 * 60 * 1000;
-const PREFETCH_GAP_MS = 1500;
 const DEFAULT_GROUP = "ИС2-241-ОБ";
 
 const app = document.getElementById("app");
@@ -431,7 +431,7 @@ async function refresh(iso, force) {
   if (online) state.lastRefresh = Date.now();
   state.loading = true;
   render();
-  const snapPromise = fetchSnapshot(group);
+  const snapPromise = state.record?.days?.length ? Promise.resolve(null) : fetchSnapshot(group);
   const livePromise = online
     ? fetchLive(group, iso).catch((error) => ({ issue: error?.kind || "offline", record: null }))
     : Promise.resolve({ issue: "offline", record: null });
@@ -443,7 +443,13 @@ async function refresh(iso, force) {
   }
   const live = await livePromise;
   if (token !== refreshToken) return;
-  if (live.record) state.record = await saveRecord(group, mergeRecords(state.record, live.record));
+  if (live.record) {
+    const saved = await saveRecord(group, mergeRecords(state.record, live.record));
+    const start = mondayOf(moscowIso());
+    // Calendar browsing outside the offline range remains available online,
+    // but these dates never expand persistent group storage.
+    state.record = iso < start || iso > addDays(start, 13) ? live.record : saved;
+  }
   state.liveIssue = live.issue || "";
   state.loading = false;
   render();
@@ -454,35 +460,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// В фоне и по одной: недавние группы получают текущую и три следующие недели для офлайна.
-let prefetching = false;
-
+// Two shared files, independent of how many groups have been opened on this device.
 async function prefetchRecent() {
-  if (prefetching || !navigator.onLine) return;
-  const last = Number(localStorage.getItem("rasp.prefetchAt") || 0);
-  if (Date.now() - last < PREFETCH_EVERY_MS) return;
-  prefetching = true;
-  try {
-    localStorage.setItem("rasp.prefetchAt", String(Date.now()));
-    for (const group of loadRecent()) {
-      if (group === state.group) continue;
-      const saved = loadRecord(group);
-      const savedAt = Date.parse(saved?.fetchedAt || "");
-      if (saved?.origin === "live" && Date.now() - savedAt < PREFETCH_EVERY_MS) continue;
-      await sleep(PREFETCH_GAP_MS);
-      if (!navigator.onLine) return;
-      try {
-        const live = await fetchLive(group, moscowIso());
-        if (!live.issue && group !== state.group) await saveRecord(group, mergeRecords(loadRecord(group), live.record));
-      } catch (error) {
-        if (error?.kind === "offline") return;
-      }
+  await syncBundles(() => {
+    const start = mondayOf(moscowIso());
+    if (state.group && activeIso() >= start && activeIso() <= addDays(start, 13)) {
+      state.record = mergeRecords(state.record, bundledRecord(state.group));
     }
-  } catch {
-    /* Предзагрузка необязательна. */
-  } finally {
-    prefetching = false;
-  }
+    render();
+  });
 }
 
 function offlineNow() {
@@ -490,10 +476,12 @@ function offlineNow() {
 }
 
 function statusText() {
+  if (!dayByDate(activeIso())) return "Для выбранной даты нет сохранённых свежих данных. Подключитесь к интернету.";
+  if (bundleStatus) return `${navigator.onLine ? "" : "Нет сети. "}${bundleStatus} Копия группы: ${formatStamp(state.record.fetchedAt)}.`;
   if (state.loading) return "Обновляем расписание…";
   if (!state.record?.fetchedAt) {
     if (offlineNow()) {
-      return "Для этой группы ещё нет сохранённой копии. Откройте её, когда будет интернет — после этого она будет доступна офлайн.";
+      return "Для этой группы ещё нет сохранённой копии. Подключитесь к интернету и дождитесь сохранения всех групп.";
     }
     if (state.liveIssue === "upstream") return "Сайт ВГЛТУ не ответил, а сохранённой копии для этой группы ещё нет. Попробуйте «Обновить» чуть позже.";
     return "Расписание ещё не загружено.";
@@ -2126,7 +2114,7 @@ async function commitGroup(raw) {
   state.follow = "today";
   state.mode = "today";
   state.anchor = null;
-  state.record = loadRecord(name) || (await readCachedRecord(name));
+  state.record = mergeRecords(loadRecord(name) || (await readCachedRecord(name)), bundledRecord(name));
   state.seenToday = moscowIso();
   render();
   refresh(moscowIso(), true);
@@ -2261,6 +2249,7 @@ app.addEventListener("click", (event) => {
     state.mode = "day";
     render();
   } else if (action === "refresh") {
+    prefetchRecent();
     const days = visibleWeekDays(activeIso(), moscowIso());
     refresh(state.mode === "week" && days.length ? days[0] : activeIso(), true);
   } else if (action === "att-scope") {
@@ -2416,7 +2405,7 @@ window.addEventListener("online", () => {
 window.addEventListener("offline", () => render());
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") tick();
+  if (document.visibilityState === "visible") { tick(); prefetchRecent(); }
 });
 
 window.addEventListener("pageshow", () => tick());
@@ -2861,7 +2850,9 @@ function restoreLastMode() {
   }
 }
 
-function boot() {
+async function boot() {
+  await initBundles();
+  pruneGroupHistory();
   // Старые версии (до 23.09) хранили адрес Worker на workers.dev — он больше не нужен.
   try {
     localStorage.removeItem("rasp.workerUrl");
@@ -2889,7 +2880,7 @@ function boot() {
   state.query = state.group || DEFAULT_GROUP;
   state.pickerOpen = !state.group;
   state.pickerCanClose = false;
-  if (state.group) state.record = loadRecord(state.group);
+  if (state.group) state.record = mergeRecords(loadRecord(state.group), bundledRecord(state.group));
   render();
   if (state.group && !state.record) {
     readCachedRecord(state.group).then((cached) => {
@@ -2920,7 +2911,7 @@ function boot() {
   });
   planNotification(state.record);
   setInterval(tick, 30000);
-  setTimeout(prefetchRecent, 8000);
+  setTimeout(prefetchRecent, 0);
 }
 
 boot();

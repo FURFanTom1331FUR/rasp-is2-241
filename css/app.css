@@ -59,7 +59,7 @@ button { cursor: pointer; }
 a { color: var(--accent-ink); }
 
 .app {
-  width: min(440px, 100%);
+  width: min(720px, 100%);
   min-height: 100dvh;
   margin: 0 auto;
   background: var(--bg);

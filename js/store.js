@@ -1,3 +1,10 @@
+import { addDays, mondayOf, moscowIso } from './dates.js';
+
+function bounded(record) {
+  if (!record) return record;
+  const start = mondayOf(moscowIso()), end = addDays(start, 13);
+  return { ...record, days: (record.days || []).filter(d => d.date >= start && d.date <= end) };
+}
 const GROUP_KEY = "rasp.group";
 const DATA_CACHE = "rasp-data-v1";
 const RECENT_KEY = "rasp.recent";
@@ -106,7 +113,7 @@ export function rememberRecent(group) {
 export function loadRecord(group) {
   try {
     const raw = localStorage.getItem(recordKey(group));
-    return raw ? JSON.parse(raw) : null;
+    return raw ? bounded(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
@@ -118,8 +125,8 @@ function fetchedTime(record) {
 }
 
 export function mergeRecords(base, incoming) {
-  if (!base) return incoming;
-  if (!incoming) return base;
+  if (!base) return bounded(incoming);
+  if (!incoming) return bounded(base);
   const incomingNewer = fetchedTime(incoming) >= fetchedTime(base);
   const primary = incomingNewer ? incoming : base;
   const secondary = incomingNewer ? base : incoming;
@@ -131,7 +138,7 @@ export function mergeRecords(base, incoming) {
     fetchedAt: primary.fetchedAt,
     source: primary.source,
     origin: primary.origin || secondary.origin || "cache",
-    days: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
+    days: bounded({ days: [...byDate.values()] }).days.sort((a, b) => a.date.localeCompare(b.date)),
   };
 }
 
@@ -161,7 +168,7 @@ function writeRecord(group, text) {
 }
 
 export async function saveRecord(group, record) {
-  const payload = { ...record, group };
+  const payload = bounded({ ...record, group });
   writeRecord(group, JSON.stringify(payload));
   try {
     const cache = await caches.open(DATA_CACHE);
@@ -184,8 +191,24 @@ export async function readCachedRecord(group) {
     const response = await cache.match(recordUrl(group));
     if (!response) return null;
     const record = await response.json();
-    return Array.isArray(record?.days) ? record : null;
+    return Array.isArray(record?.days) ? bounded(record) : null;
   } catch {
     return null;
   }
+}
+
+export async function pruneGroupHistory() {
+  for (const group of storedRecordGroups()) {
+    const record = loadRecord(group);
+    if (record) writeRecord(group, JSON.stringify(record));
+  }
+  try {
+    const cache = await caches.open(DATA_CACHE);
+    for (const request of await cache.keys()) {
+      if (!new URL(request.url).pathname.includes('/data/schedules/')) continue;
+      const response = await cache.match(request);
+      const record = bounded(await response.json());
+      if (Array.isArray(record?.days)) await cache.put(request, Response.json(record));
+    }
+  } catch { /* Failed migration leaves the working copy intact. */ }
 }
